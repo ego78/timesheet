@@ -1,4 +1,4 @@
-# ignora i file che bloccano il build
+# ignora i file che bloccano il build, così Vercel non fallisce
 src/app/page.tsx
 src/app/ferie/page.tsx
 src/components/InstallPWAButton.tsx
