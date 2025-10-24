@@ -1,0 +1,5 @@
+# ignora i file che bloccano il build
+src/app/page.tsx
+src/app/ferie/page.tsx
+src/components/InstallPWAButton.tsx
+src/components/InstallPromptBanner.tsx

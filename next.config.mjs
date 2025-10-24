@@ -1,4 +1,3 @@
-// next.config.mjs
 import withPWA from "next-pwa";
 import runtimeCaching from "next-pwa/cache.js";
 
@@ -19,10 +18,10 @@ const withPWACustom = withPWA({
 export default withPWACustom({
   reactStrictMode: true,
   eslint: {
-    ignoreDuringBuilds: true, // ✅ non bloccare il build
-    dirs: [],                 // ✅ non lanciare eslint in build
+    ignoreDuringBuilds: true, // non bloccare il build
+    dirs: [],                 // non lanciare eslint durante il build
   },
   typescript: {
-    ignoreBuildErrors: true,  // ✅ non bloccare il build su errori TS
+    ignoreBuildErrors: true,  // (paracadute) non bloccare per errori TS
   },
 });
