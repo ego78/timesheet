@@ -11,6 +11,7 @@ import {
   Timestamp,
 } from "firebase/firestore";
 
+/* ===== Tipi ===== */
 type DayDoc = {
   ordinary?: number;        // ore ordinarie (decimali)
   overtime?: number;        // ore straordinarie (decimali)
@@ -20,18 +21,18 @@ type DayDoc = {
 };
 
 type Props = {
-  userId: string;   // stesso usato in scrittura
+  userId: string;   // lo stesso usato in scrittura
   yyyymm: string;   // "YYYY-MM"
 };
 
-/* ---- utils ---- */
+/* ===== Utils ===== */
+const DOW_LABELS = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"];
+
 function fmt(n?: number | null, showZero = false) {
   if (typeof n !== "number" || Number.isNaN(n)) return showZero ? "0,00" : "";
   if (!showZero && Math.abs(n) < 1e-9) return "";
   return n.toFixed(2).replace(".", ",");
 }
-
-const DOW_LABELS = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"];
 
 function monthMeta(yyyymm: string) {
   const y = Number(yyyymm.slice(0, 4));
@@ -41,7 +42,7 @@ function monthMeta(yyyymm: string) {
   // JS: 0=Dom,1=Lun,... → 0=Lun,...6=Dom
   const mondayIndex = (first.getDay() + 6) % 7;
   const totalCells = Math.ceil((mondayIndex + lastDay) / 7) * 7;
-  return { lastDay, mondayIndex, totalCells };
+  return { y, m, lastDay, mondayIndex, totalCells };
 }
 
 function justBadge(j?: string | null) {
@@ -58,14 +59,22 @@ function justBadge(j?: string | null) {
   }
 }
 
+function ymd(yyyymm: string, day: number) {
+  return `${yyyymm}-${String(day).padStart(2, "0")}`;
+}
+
+/* ===== Componente ===== */
 export default function MonthlyPreview({ userId, yyyymm }: Props) {
   const [map, setMap] = useState<Record<string, DayDoc>>({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
+  // selezione giorno (apertura dettagli)
+  const [openId, setOpenId] = useState<string | null>(null);
+
   const { lastDay, mondayIndex, totalCells } = useMemo(() => monthMeta(yyyymm), [yyyymm]);
 
-  // Realtime sul mese
+  /* Realtime Firestore sul mese */
   useEffect(() => {
     setLoading(true);
     setErr(null);
@@ -96,21 +105,35 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
     return () => unsub();
   }, [userId, yyyymm]);
 
-  // ✅ Totali: ignorano i giorni con giustificativo
+  /* Totali mese live: ignorano i giorni con giustificativo */
   const { sumOrd, sumOt } = useMemo(() => {
     let o = 0;
     let s = 0;
     Object.values(map).forEach((v) => {
-      if (v.just) return; // se c'è giustificativo, non sommare
+      if (v.just) return; // se giustificato, non sommare
       if (typeof v.ordinary === "number") o += v.ordinary;
       if (typeof v.overtime === "number") s += v.overtime;
     });
     return { sumOrd: o, sumOt: s };
   }, [map]);
 
+  /* Stato del giorno selezionato */
+  const selected = openId ? map[openId] ?? {} : null;
+  const selectedDayNum = openId ? Number(openId.slice(8, 10)) : null;
+
+  /* Chiudi su ESC */
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpenId(null);
+    }
+    if (openId) window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openId]);
+
+  /* Render */
   return (
     <div className="p-3 sm:p-4">
-      {/* Barra totali sticky */}
+      {/* Barra totali sticky (sempre visibile, mobile-friendly) */}
       <div className="sticky top-0 z-10 mb-3">
         <div className="rounded-xl border bg-white/90 backdrop-blur px-3 py-2 flex items-center justify-between text-xs sm:text-sm">
           <div className="font-medium">Anteprima · {yyyymm}</div>
@@ -130,7 +153,7 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
         ))}
       </div>
 
-      {/* griglia mese */}
+      {/* griglia mese (mobile-first, leggibile) */}
       <div className="grid grid-cols-7 gap-1 sm:gap-2">
         {Array.from({ length: totalCells }).map((_, idx) => {
           const dayNum = idx - mondayIndex + 1;
@@ -138,16 +161,16 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
             return (
               <div
                 key={`e-${idx}`}
-                className="rounded-lg border border-slate-100 bg-slate-50/40 h-16 sm:h-24"
+                className="rounded-lg border border-slate-100 bg-slate-50/40 h-20 sm:h-24"
               />
             );
           }
 
-          const id = `${yyyymm}-${String(dayNum).padStart(2, "0")}`;
+          const id = ymd(yyyymm, dayNum);
           const row = map[id] || {};
           const jb = justBadge(row.just);
-          const hasOrd = typeof row.ordinary === "number" && row.just == null;
-          const hasOt  = typeof row.overtime === "number" && row.just == null;
+          const hasOrd = typeof row.ordinary === "number" && !row.just;
+          const hasOt  = typeof row.overtime === "number" && !row.just;
 
           const cellTone =
             row.just
@@ -157,42 +180,123 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
               : "border-slate-100 bg-white";
 
           return (
-            <div
+            <button
               key={id}
-              className={`rounded-lg border h-16 sm:h-24 p-1.5 sm:p-2 flex flex-col ${cellTone}`}
+              type="button"
+              onClick={() => setOpenId(id)}
+              className={`rounded-lg border h-20 sm:h-24 p-2 flex flex-col justify-between outline-none focus:ring-2 focus:ring-sky-300 ${cellTone}`}
+              aria-label={`Apri dettagli ${id}`}
             >
+              {/* top bar: numero giorno a destra */}
               <div className="flex items-center justify-between">
-                <span className="text-[10px] sm:text-xs text-slate-400"> </span>
+                <span className="text-xs text-slate-400"></span>
                 <span className="text-xs sm:text-sm font-semibold">{String(dayNum).padStart(2, "0")}</span>
               </div>
 
-              <div className="mt-1 flex-1 flex flex-col gap-1 overflow-hidden">
-                {row.just ? (
-                  <span className={`w-fit max-w-full px-1.5 py-0.5 rounded-full text-[10px] sm:text-xs ${jb?.cls} truncate`}>
-                    {jb?.label}
-                  </span>
-                ) : (
-                  <>
-                    {hasOrd && (
-                      <div className="w-fit max-w-full px-1.5 py-0.5 rounded-full bg-white/70 border text-[10px] sm:text-xs font-medium truncate">
-                        O {fmt(row.ordinary)}
-                      </div>
-                    )}
-                    {hasOt && (
-                      <div className="w-fit max-w-full px-1.5 py-0.5 rounded-full bg-white/70 border text-[10px] sm:text-xs font-medium truncate">
-                        S {fmt(row.overtime)}
-                      </div>
-                    )}
-                    {!hasOrd && !hasOt && (
-                      <div className="text-[10px] text-slate-300 italic">—</div>
-                    )}
-                  </>
-                )}
-              </div>
-            </div>
+              {/* contenuto centrato e compatto */}
+              {row.just ? (
+                <span className={`block text-center px-1 py-0.5 rounded-full text-[11px] ${jb?.cls} truncate`}>
+                  {jb?.label}
+                </span>
+              ) : (
+                <div className="text-center leading-tight">
+                  {hasOrd && (
+                    <div className="text-[11px] sm:text-xs font-medium text-slate-800">
+                      Ord: {fmt(row.ordinary, true)}
+                    </div>
+                  )}
+                  {hasOt && (
+                    <div className="text-[11px] sm:text-xs font-medium text-slate-800">
+                      Stra: {fmt(row.overtime, true)}
+                    </div>
+                  )}
+                  {!hasOrd && !hasOt && (
+                    <div className="text-[11px] text-slate-300 italic">—</div>
+                  )}
+                </div>
+              )}
+            </button>
           );
         })}
       </div>
+
+      {/* ===== Bottom Sheet: dettagli giorno ===== */}
+      {openId && (
+        <div className="fixed inset-0 z-[70]">
+          {/* backdrop */}
+          <div
+            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            onClick={() => setOpenId(null)}
+          />
+          {/* sheet */}
+          <div className="absolute inset-x-0 bottom-0 bg-white rounded-t-2xl shadow-xl p-4 sm:p-6 border-t">
+            <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-slate-200" />
+            <div className="flex items-center justify-between">
+              <h4 className="text-base sm:text-lg font-semibold">
+                Dettagli — {openId}
+              </h4>
+              <button
+                className="text-slate-600 hover:text-slate-900 text-sm px-2 py-1 rounded-md border"
+                onClick={() => setOpenId(null)}
+              >
+                Chiudi
+              </button>
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+              <div className="p-3 rounded-lg border bg-slate-50">
+                <div className="text-[11px] text-slate-500">Tipo</div>
+                {selected?.just ? (
+                  <div className={`mt-1 inline-block px-2 py-0.5 rounded-full text-xs ${justBadge(selected?.just)?.cls}`}>
+                    {justBadge(selected?.just)?.label}
+                  </div>
+                ) : (
+                  <div className="mt-1 font-medium">Lavoro</div>
+                )}
+              </div>
+
+              <div className="p-3 rounded-lg border bg-slate-50">
+                <div className="text-[11px] text-slate-500">Aggiornato</div>
+                <div className="mt-1">
+                  {selected?.updatedAt
+                    ? new Date(selected.updatedAt.toMillis()).toLocaleString()
+                    : "—"}
+                </div>
+              </div>
+
+              <div className="p-3 rounded-lg border bg-slate-50">
+                <div className="text-[11px] text-slate-500">Ordinarie</div>
+                <div className="mt-1 font-mono">{selected?.just ? "—" : fmt(selected?.ordinary, true)}</div>
+              </div>
+
+              <div className="p-3 rounded-lg border bg-slate-50">
+                <div className="text-[11px] text-slate-500">Straordinarie</div>
+                <div className="mt-1 font-mono">{selected?.just ? "—" : fmt(selected?.overtime, true)}</div>
+              </div>
+            </div>
+
+            {/* Suggerimento opzionale: per portarti rapidamente a quel giorno nella pagina principale,
+                intercettiamo un evento custom che la pagina può ascoltare (non obbligatorio). */}
+            <div className="mt-4 flex items-center justify-between gap-2">
+              <small className="text-slate-500">
+                Tocca una cella per aprire i dettagli del giorno.
+              </small>
+              <button
+                className="px-3 py-1.5 rounded-md border bg-white hover:bg-slate-50 text-sm"
+                onClick={() => {
+                  // Evento custom: la pagina principale può ascoltarlo per impostare la data
+                  // window.addEventListener("timesheet:pick-day", e => { const id=(e as CustomEvent).detail.id })
+                  const ev = new CustomEvent("timesheet:pick-day", { detail: { id: openId, day: selectedDayNum } });
+                  window.dispatchEvent(ev);
+                  setOpenId(null);
+                }}
+              >
+                Apri questo giorno
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
