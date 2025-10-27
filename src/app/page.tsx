@@ -19,6 +19,7 @@ import { motion } from "framer-motion";
 import { WORKERS } from "./workers";
 import MonthlyPreview from "@/components/MonthlyPreview";
 import { upsertDay } from "@/lib/timesheet";
+import { migrateEmailDaysToUid } from "@/lib/migrate";
 
 /* ================== HELPER: fetch con timeout ================== */
 async function fetchWithTimeout(input: RequestInfo, init: RequestInit = {}, ms = 8000) {
@@ -68,15 +69,11 @@ function toYmdLocal(d: Date) {
   const iso = new Date(dd.getTime() - dd.getTimezoneOffset() * 60000).toISOString();
   return iso.slice(0, 10);
 }
-
-// "8,00" -> 8; "4,50" -> 4.5
 function parseHoursComma(h?: string | null): number | null {
   if (!h) return null;
   if (!/^\d+(,\d{2})?$/.test(h)) return null;
   return Number(h.replace(",", "."));
 }
-
-// somma ore decimali ad un orario "HH:MM" -> "HH:MM"
 function addDecHours(startHHMM: string, hoursDec: number): string {
   const [hh, mm] = startHHMM.split(":").map((n) => parseInt(n, 10));
   const startMin = hh * 60 + (mm || 0);
@@ -87,15 +84,12 @@ function addDecHours(startHHMM: string, hoursDec: number): string {
   const M = tot % 60;
   return `${String(H).padStart(2, "0")}:${String(M).padStart(2, "0")}`;
 }
-
-// orario contrattuale predefinito per quella data
 function getDefaultOrdForDate(profile: any, date: Date): string | undefined {
   const key = weekdayKey(date);
   const h = profile?.schedule?.[key];
   if (!h) return undefined;
   return h === "0,00" ? undefined : h;
 }
-
 function getDefaultTimesForDate(profile: any, date: Date): { start: string; end: string } {
   const dow = weekdayKey(date);
   const preset = profile?.times?.[dow] as { start?: string; end?: string } | undefined;
@@ -109,8 +103,6 @@ function getDefaultTimesForDate(profile: any, date: Date): { start: string; end:
   }
   return { start: "", end: "" };
 }
-
-/** Badge giustificativo */
 function giustificativoBadge(v?: string | null): { label: string; className: string } | null {
   switch (v) {
     case "F":   return { label: "Ferie",            className: "bg-blue-100 text-blue-700" };
@@ -175,7 +167,7 @@ function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 }
 
 /* ===== PAGINA LAVORATORE ===== */
-function WorkerPage({ userEmail }: { userEmail: string }) {
+function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string }) {
   const profilo = WORKERS[userEmail];
 
   // mese corrente (12:00)
@@ -192,10 +184,6 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
     return d;
   });
 
-  // userId normalizzato esattamente come in scrittura Firestore
-  const userId = (auth.currentUser?.uid || userEmail).toLowerCase();
-
-  // yyyymm per la preview
   const yyyymm = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
 
   const [ordinario, setOrdinario] = useState<string | undefined>(() =>
@@ -251,8 +239,9 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
 
   // al mount: forza la data nel mese
   useEffect(() => {
-    if (today < monthStart) setToday(new Date(monthStart));
-    if (today > monthEnd) setToday(new Date(monthEnd));
+    const d = new Date(today);
+    if (d < monthStart) setToday(new Date(monthStart));
+    if (d > monthEnd) setToday(new Date(monthEnd));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -283,7 +272,6 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ordinario, giust, straordinario]);
 
-  // VALIDAZIONI
   const manualHoursError = useMemo(() => {
     if (!(manualMode && !giust)) return null;
     if (!manualHours) return "Inserisci le ore (formato H,MM — es. 7,00).";
@@ -317,7 +305,6 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
 
   const hasBlockingErrors = !!(manualHoursError || timesError || overtimeNotesError || protocolError);
 
-  // timer overlay salvataggio
   useEffect(() => {
     if (!saving) return;
     setElapsedMs(0);
@@ -326,14 +313,17 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
     return () => clearInterval(id);
   }, [saving]);
 
-  // ==== SALVA ====
   async function inviaDati() {
+    if (!userUid) {
+      setErr("Utente non autenticato.");
+      return;
+    }
+
     setErr(null);
     setStatus(null);
     setSaveOk(false);
     setSaving(true);
 
-    // WATCHDOG: forza la chiusura dell’overlay dopo 12s
     const watchdog = setTimeout(() => {
       setSaveOk(false);
       setSaving(false);
@@ -388,7 +378,6 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
       writes.push({ range: toA1("F", dayRow), value: straordinario || "" });
       writes.push({ range: toA1("L", dayRow), value: note || "" });
 
-      // FOGLIO PRESENZE (solo se non giustificativo)
       if (!giust) {
         const day = today.getDate();
         const rowCE = 11 + day;
@@ -461,38 +450,30 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
         }
       })().catch(() => void 0);
 
-      // ========= 3) SCRITTURA SU FIRESTORE =========
-      // Se è un giustificativo: salvo JUST e AZZERO ore.
-      // Se sono ore: salvo ORD/OT e AZZERO JUST.
+      // ========= 3) SCRITTURA SU FIRESTORE (USA SEMPRE uid) =========
       const isJust = isGiustificativo(valueOrdinario);
       const ordDec = !isJust ? (parseHoursComma(valueOrdinario!) ?? null) : null;
       const otDec  = !isJust ? (straordinario ? Number(straordinario) : null) : null;
       const just   = isJust ? valueOrdinario! : null;
 
-      // Scrivo SEMPRE tutti e 3 i campi (null quando vanno azzerati)
-      const dayPatch: any = {
-        just,                 // string | null
-        ordinary: ordDec,     // number | null
-        overtime: otDec,      // number | null
-      };
+      await upsertDay(userUid, ymd, {
+        just,
+        ordinary: ordDec,
+        overtime: otDec,
+      });
 
-      await upsertDay(userId, ymd, dayPatch);
-
-      // successo
       setSaveOk(true);
       setStatus("Dati salvati correttamente.");
     } catch (e: any) {
+      console.error("Errore salvataggio:", e);
       setErr(e?.message || String(e));
       setStatus(null);
     } finally {
-      // chiudi SUBITO l’elaborazione; se c’è la spunta ok, la teniamo 0.8s
       setSaving(false);
       setTimeout(() => setSaveOk(false), 800);
-      clearTimeout(watchdog);
     }
   }
 
-  // EARLY RETURNS per stato profilo
   if (!profilo) {
     return (
       <div className="min-h-screen grid place-items-center bg-amber-50 p-4">
@@ -779,37 +760,12 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
         </motion.div>
       </main>
 
-      {/* Action bar MOBILE (< sm) fissa in basso */}
+      {/* Action bar MOBILE */}
       <div className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-white/95 border-t shadow-lg">
         <div className="px-3 py-2 grid grid-cols-3 gap-2">
-          <Button
-            size="sm"
-            onClick={inviaDati}
-            disabled={hasBlockingErrors || saving}
-            className="w-full"
-          >
-            Salva
-          </Button>
-
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => setShowPreview((v) => !v)}
-            disabled={saving}
-            className="w-full"
-          >
-            Anteprima
-          </Button>
-
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => (window.location.href = "/ferie")}
-            disabled={saving}
-            className="w-full"
-          >
-            Ferie
-          </Button>
+          <Button size="sm" onClick={inviaDati} disabled={hasBlockingErrors || saving} className="w-full">Salva</Button>
+          <Button size="sm" variant="secondary" onClick={() => setShowPreview((v) => !v)} disabled={saving} className="w-full">Anteprima</Button>
+          <Button size="sm" variant="secondary" onClick={() => (window.location.href = "/ferie")} disabled={saving} className="w-full">Ferie</Button>
         </div>
 
         <div className="px-3 pb-2">
@@ -845,25 +801,19 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
       {/* Overlay ANTEPRIMA CALENDARIO */}
       {showPreview && (
         <div className="fixed inset-0 z-[60] flex flex-col bg-black/60 backdrop-blur-sm">
-          {/* Top bar */}
           <div className="flex items-center justify-between gap-2 px-4 sm:px-6 py-3 bg-white/95 border-b">
             <div className="flex items-center gap-2">
               <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
               <span className="text-sm sm:text-base font-medium">Anteprima mese corrente</span>
             </div>
-
             <div className="flex items-center gap-2">
-              <Button variant="secondary" onClick={() => setShowPreview(false)} className="py-1 h-9">
-                ✕ Chiudi
-              </Button>
+              <Button variant="secondary" onClick={() => setShowPreview(false)} className="py-1 h-9">✕ Chiudi</Button>
             </div>
           </div>
 
-          {/* Contenuto: calendario */}
           <div className="flex-1 p-2 sm:p-4">
             <div className="w-full h-full bg-white rounded-lg overflow-auto shadow relative">
-              {/* >>> Passo userId & yyyymm: la preview ascolta Firestore in tempo reale */}
-              <MonthlyPreview userId={userId} yyyymm={yyyymm} />
+              <MonthlyPreview userId={userUid} yyyymm={yyyymm} />
             </div>
           </div>
         </div>
@@ -875,17 +825,49 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
 /* ===== ROOT APP ===== */
 export default function App() {
   const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userUid, setUserUid] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
+    let mounted = true;
     const unsub = onAuthStateChanged(auth, (user) => {
-      setUserEmail(user?.email?.toLowerCase() ?? null);
-      setReady(true);
+      if (!mounted) return;
+      try {
+        if (!user) {
+          // Nessun utente → vai a Login
+          setUserEmail(null);
+          setUserUid(null);
+          setReady(true);
+          return;
+        }
+
+        const emailLower = user.email?.toLowerCase() ?? "";
+        const uid = user.uid;
+
+        // Migrazione email→uid NON bloccante (fire-and-forget)
+        migrateEmailDaysToUid(emailLower, uid)
+          .catch((e) => console.warn("Migrazione email→uid fallita:", e));
+
+        setUserEmail(emailLower);
+        setUserUid(uid);
+        setReady(true);
+      } catch (e) {
+        console.error("Auth listener error:", e);
+        setReady(true);
+      }
     });
-    return () => unsub();
+
+    // Watchdog: anche se qualcosa va storto, sblocca l'UI
+    const watchdog = setTimeout(() => setReady(true), 4000);
+
+    return () => {
+      mounted = false;
+      unsub();
+      clearTimeout(watchdog);
+    };
   }, []);
 
   if (!ready) return <div className="min-h-screen grid place-items-center text-slate-500 p-4">Caricamento…</div>;
-  if (!userEmail) return <Login onLoggedIn={() => void 0} />;
-  return <WorkerPage userEmail={userEmail} />;
+  if (!userEmail || !userUid) return <Login onLoggedIn={() => void 0} />;
+  return <WorkerPage userEmail={userEmail} userUid={userUid} />;
 }
