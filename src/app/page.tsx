@@ -496,22 +496,40 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
     <div className="min-h-screen bg-white">
       {/* HEADER */}
       <header className="sticky top-0 z-40 bg-white/90 backdrop-blur supports-[backdrop-filter]:bg-white/70 border-b shadow-sm">
-        <div className="p-4 sm:p-6">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-3">
-              <h1 className="text-lg sm:text-xl md:text-2xl font-semibold">Foglio Presenze</h1>
-            </div>
-            <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
-              <Button variant="secondary" onClick={() => (window.location.href = "/ferie")} className="w-full sm:w-auto">
-                Piano Ferie
-              </Button>
-              <div className="text-left sm:text-right">
-                <p className="text-sm">{profilo.nome} {profilo.cognome}</p>
-                <p className="text-xs text-slate-500 break-all">{userEmail}</p>
+        <div className="px-3 py-3 sm:px-6 sm:py-4">
+          <div className="flex items-center justify-between gap-2">
+            <h1 className="text-base sm:text-xl md:text-2xl font-semibold">Foglio Presenze</h1>
+
+            {/* Gruppo destro sempre in linea, anche su mobile */}
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => (window.location.href = "/ferie")}
+                  className="px-2 whitespace-nowrap"
+                >
+                  Piano Ferie
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => signOut(auth)}
+                  className="px-2 whitespace-nowrap"
+                >
+                  Esci
+                </Button>
               </div>
-              <Button variant="secondary" onClick={() => signOut(auth)} className="w-full sm:w-auto">
-                Esci
-              </Button>
+
+              {/* Info utente, troncate per non andare a capo */}
+              <div className="hidden xs:flex flex-col items-end leading-tight min-w-0">
+                <p className="text-xs sm:text-sm truncate max-w-[38vw] sm:max-w-[22rem]">
+                  {profilo.nome} {profilo.cognome}
+                </p>
+                <p className="text-[10px] sm:text-xs text-slate-500 truncate max-w-[38vw] sm:max-w-[22rem]">
+                  {userEmail}
+                </p>
+              </div>
             </div>
           </div>
         </div>

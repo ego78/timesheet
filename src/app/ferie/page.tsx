@@ -477,25 +477,43 @@ export default function PianoFeriePage() {
   // ---------- RENDER ----------
   return (
     <div className="min-h-screen bg-white">
-      {/* HEADER responsive */}
+      {/* HEADER responsive: bottoni in-line anche su mobile */}
       <header className="sticky top-0 z-40 bg-white/90 backdrop-blur supports-[backdrop-filter]:bg-white/70 border-b shadow-sm">
-  <div className="p-4 sm:p-6">
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div>
-        <h1 className="text-lg sm:text-xl md:text-2xl font-semibold">Piano Ferie / ROL</h1>
-        <p className="text-sm text-slate-500">Seleziona i giorni e salva sul foglio master.</p>
-      </div>
-      <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
-        <Button variant="secondary" onClick={() => (window.location.href = "/")} className="w-full sm:w-auto" disabled={saving}>
-          ← Torna
-        </Button>
-        <Button variant="secondary" onClick={() => signOut(auth)} className="w-full sm:w-auto" disabled={saving}>
-          Esci
-        </Button>
-      </div>
-    </div>
-  </div>
-</header>
+        <div className="px-3 py-3 sm:px-6 sm:py-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <h1 className="text-base sm:text-xl md:text-2xl font-semibold">Piano Ferie / ROL</h1>
+              <p className="hidden sm:block text-sm text-slate-500">
+                Seleziona i giorni e salva sul foglio master.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => (window.location.href = "/")}
+                className="px-2 whitespace-nowrap"
+                disabled={saving}
+              >
+                ← Torna
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => signOut(auth)}
+                className="px-2 whitespace-nowrap"
+                disabled={saving}
+              >
+                Esci
+              </Button>
+            </div>
+          </div>
+          <p className="sm:hidden mt-1 text-xs text-slate-500">
+            Seleziona i giorni e salva sul foglio master.
+          </p>
+        </div>
+      </header>
 
       <main className="max-w-5xl mx-auto p-4 sm:p-6 md:p-8 space-y-8">
         {/* Inserimento */}
