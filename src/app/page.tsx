@@ -8,8 +8,9 @@ import Lottie from "lottie-react";
 import loginAnim from "@/animations/cleaner.json";
 import userAnim from "@/animations/cleaner.json";
 import React, { useEffect, useMemo, useState } from "react";
-import { auth } from "./firebase";
+import { auth, db } from "./firebase";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import { waitForPendingWrites } from "firebase/firestore";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -33,7 +34,7 @@ async function fetchWithTimeout(input: RequestInfo, init: RequestInit = {}, ms =
   }
 }
 
-/* ===== COSTANTI ESISTENTI (GAS) ===== */
+/* ===== COSTANTI GAS ===== */
 const GAS_ENDPOINT =
   process.env.NEXT_PUBLIC_GAS_ENDPOINT ||
   "https://script.google.com/macros/s/AKfycbx2cyiFykEvzA5NcRK5Cr2lb4EMOHoJUG7CWJkh06HUUEoKsMzB_wqpcZPZ0vomnIqKjw/exec";
@@ -42,7 +43,6 @@ const SHEET_NAME = "STRAORDINARIO E GIUSTIFICATIVI";
 const PRESENZE_TAB = "FOGLIO PRESENZE DIGITALE";
 const SECRET = "CAMBIA-MI";
 
-// giustificativi
 const GIUSTIFICATIVI = ["F", "ROL", "M", "FES", "FP", "L104", "R"] as const;
 const DOW_KEYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
 
@@ -170,25 +170,20 @@ function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string }) {
   const profilo = WORKERS[userEmail];
 
-  // mese corrente (12:00)
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 12, 0, 0, 0);
   const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 12, 0, 0, 0);
   const monthStartISO = new Date(monthStart.getTime() - monthStart.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
   const monthEndISO   = new Date(monthEnd.getTime()   - monthEnd.getTimezoneOffset()   * 60000).toISOString().slice(0, 10);
 
-  // state
   const [today, setToday] = useState(() => {
     const d = new Date();
     d.setHours(12, 0, 0, 0);
     return d;
   });
-
   const yyyymm = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
 
-  const [ordinario, setOrdinario] = useState<string | undefined>(() =>
-    getDefaultOrdForDate(profilo, new Date())
-  );
+  const [ordinario, setOrdinario] = useState<string | undefined>(() => getDefaultOrdForDate(profilo, new Date()));
   const [manualMode, setManualMode] = useState(false);
   const [manualHours, setManualHours] = useState<string>("");
 
@@ -202,18 +197,14 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
   const [err, setErr] = useState<string | null>(null);
   const [dateErr, setDateErr] = useState<string | null>(null);
 
-  // overlay salvataggio
   const [saving, setSaving] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [saveOk, setSaveOk] = useState(false);
 
-  // overlay ANTEPRIMA calendario
   const [showPreview, setShowPreview] = useState(false);
 
-  // riga foglio personale
   const riga = useMemo(() => 4 + today.getDate(), [today]);
 
-  // regex
   const timeRe = useMemo(() => /^([01]\d|2[0-3]):[0-5]\d$/, []);
   const overtimeRangeRe = useMemo(
     () => /^straordinario ore\s*([01]\d|2[0-3]):[0-5]\d\s*[-–]\s*([01]\d|2[0-3]):[0-5]\d/i,
@@ -221,14 +212,12 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
   );
   const protocolRe = useMemo(() => /^protocollo malattia n°\s*\d{9}$/i, []);
 
-  // blocca scroll quando overlay preview aperto
   useEffect(() => {
     if (showPreview) document.body.style.overflow = "hidden";
     else document.body.style.overflow = "";
     return () => { document.body.style.overflow = ""; };
   }, [showPreview]);
 
-  // chiudi overlay con ESC
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") setShowPreview(false);
@@ -237,7 +226,6 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
     return () => window.removeEventListener("keydown", onKey);
   }, [showPreview]);
 
-  // al mount: forza la data nel mese
   useEffect(() => {
     const d = new Date(today);
     if (d < monthStart) setToday(new Date(monthStart));
@@ -245,14 +233,12 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // quando scelgo un giustificativo azzero straordinario
   useEffect(() => {
     if (isGiustificativo(ordinario)) setStraordinario("");
   }, [ordinario]);
 
   const giust = isGiustificativo(ordinario);
 
-  // NOTE dinamiche
   useEffect(() => {
     if (ordinario === "M") {
       if (!note.toLowerCase().startsWith(OT_PREFIX.toLowerCase()) && !note.toLowerCase().startsWith(PROT_PREFIX.toLowerCase())) {
@@ -324,11 +310,6 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
     setSaveOk(false);
     setSaving(true);
 
-    const watchdog = setTimeout(() => {
-      setSaveOk(false);
-      setSaving(false);
-    }, 12000);
-
     try {
       if (today < monthStart || today > monthEnd) {
         setErr("Puoi salvare solo per il mese corrente.");
@@ -370,7 +351,7 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
         return;
       }
 
-      // ========= 1) SCRITTURA SU GAS (FOGLIO) =========
+      // ========= 1) SCRITTURA SU GAS =========
       const writes: { range: string; value: any }[] = [];
       const dayRow = 4 + today.getDate();
       writes.push({ range: toA1("D", dayRow), value: valueOrdinario });
@@ -406,7 +387,7 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
       const json = await res.json().catch(() => ({ ok: true }));
       if (!json?.ok) throw new Error(json?.error || "Errore sconosciuto lato server");
 
-      // ========= 2) SYNC PIANO FERIE SU GAS (NON BLOCCANTE) =========
+      // ========= 2) SYNC PIANO FERIE SU GAS (non bloccante) =========
       const ymd = toYmdLocal(today);
       (async () => {
         try {
@@ -445,12 +426,12 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
             if (!resDel.ok) throw new Error(`HTTP ${resDel.status}`);
             await resDel.json().catch(() => ({ ok: true }));
           }
-        } catch (e) {
-          console.warn("Sync piano ferie fallita/timeout:", e);
+        } catch {
+          // ignore background errors
         }
       })().catch(() => void 0);
 
-      // ========= 3) SCRITTURA SU FIRESTORE (USA SEMPRE uid) =========
+      // ========= 3) FIRESTORE (sempre uid) =========
       const isJust = isGiustificativo(valueOrdinario);
       const ordDec = !isJust ? (parseHoursComma(valueOrdinario!) ?? null) : null;
       const otDec  = !isJust ? (straordinario ? Number(straordinario) : null) : null;
@@ -461,6 +442,9 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
         ordinary: ordDec,
         overtime: otDec,
       });
+
+      // 🔒 Attesa conferma server, così l’altro device riceve subito lo snapshot
+      await waitForPendingWrites(db);
 
       setSaveOk(true);
       setStatus("Dati salvati correttamente.");
@@ -508,6 +492,8 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
               <div className="text-left sm:text-right">
                 <p className="text-sm">{profilo.nome} {profilo.cognome}</p>
                 <p className="text-xs text-slate-500 break-all">{userEmail}</p>
+                {/* UID visibile per diagnosi */}
+                <p className="text-[11px] text-slate-400 break-all">uid: {userUid}</p>
               </div>
               <Button variant="secondary" onClick={() => signOut(auth)} className="w-full sm:w-auto">
                 Esci
@@ -731,7 +717,7 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
                 {dateErr && <p className="text-xs text-red-600">{dateErr}</p>}
               </div>
 
-              {/* Azioni – DESKTOP/TABLET (>= sm) */}
+              {/* Azioni – DESKTOP/TABLET */}
               <div className="hidden sm:flex flex-wrap items-center gap-2 sm:gap-3 pt-2">
                 <Button onClick={inviaDati} disabled={hasBlockingErrors || saving}>
                   Salva giorno
@@ -834,30 +820,25 @@ export default function App() {
       if (!mounted) return;
       try {
         if (!user) {
-          // Nessun utente → vai a Login
           setUserEmail(null);
           setUserUid(null);
           setReady(true);
           return;
         }
-
         const emailLower = user.email?.toLowerCase() ?? "";
         const uid = user.uid;
 
-        // Migrazione email→uid NON bloccante (fire-and-forget)
-        migrateEmailDaysToUid(emailLower, uid)
-          .catch((e) => console.warn("Migrazione email→uid fallita:", e));
+        // Migrazione email→uid NON bloccante (una-tantum)
+        migrateEmailDaysToUid(emailLower, uid).catch(() => {});
 
         setUserEmail(emailLower);
         setUserUid(uid);
         setReady(true);
       } catch (e) {
-        console.error("Auth listener error:", e);
         setReady(true);
       }
     });
 
-    // Watchdog: anche se qualcosa va storto, sblocca l'UI
     const watchdog = setTimeout(() => setReady(true), 4000);
 
     return () => {

@@ -9,6 +9,7 @@ import {
   where,
   documentId,
   Timestamp,
+  getDocs,
 } from "firebase/firestore";
 
 /* ===== Tipi ===== */
@@ -21,7 +22,7 @@ type DayDoc = {
 };
 
 type Props = {
-  userId: string;   // lo stesso usato in scrittura
+  userId: string;   // uid Firebase
   yyyymm: string;   // "YYYY-MM"
 };
 
@@ -39,7 +40,7 @@ function monthMeta(yyyymm: string) {
   const m = Number(yyyymm.slice(5, 7)); // 1..12
   const first = new Date(y, m - 1, 1, 12, 0, 0, 0);
   const lastDay = new Date(y, m, 0, 12, 0, 0, 0).getDate();
-  // JS: 0=Dom,1=Lun,... → 0=Lun,...6=Dom
+  // JS: 0=Dom → 0=Lun,...6=Dom
   const mondayIndex = (first.getDay() + 6) % 7;
   const totalCells = Math.ceil((mondayIndex + lastDay) / 7) * 7;
   return { y, m, lastDay, mondayIndex, totalCells };
@@ -48,14 +49,14 @@ function monthMeta(yyyymm: string) {
 function justBadge(j?: string | null) {
   if (!j) return null;
   switch (j) {
-    case "F":   return { label: "Ferie",        cls: "bg-blue-100 text-blue-700" };
-    case "M":   return { label: "Malattia",     cls: "bg-green-100 text-green-700" };
-    case "ROL": return { label: "ROL",          cls: "bg-sky-100 text-sky-700" };
-    case "L104":return { label: "L.104",        cls: "bg-orange-100 text-orange-700" };
-    case "FES": return { label: "Festivo",      cls: "bg-red-100 text-red-700" };
-    case "FP":  return { label: "Patronale",    cls: "bg-rose-100 text-rose-700" };
-    case "R":   return { label: "Riposo",       cls: "bg-gray-100 text-gray-700" };
-    default:    return { label: j,              cls: "bg-slate-100 text-slate-700" };
+    case "F":   return { label: "Ferie",     cls: "bg-blue-100 text-blue-700" };
+    case "M":   return { label: "Malattia",  cls: "bg-green-100 text-green-700" };
+    case "ROL": return { label: "ROL",       cls: "bg-sky-100 text-sky-700" };
+    case "L104":return { label: "L.104",     cls: "bg-orange-100 text-orange-700" };
+    case "FES": return { label: "Festivo",   cls: "bg-red-100 text-red-700" };
+    case "FP":  return { label: "Patronale", cls: "bg-rose-100 text-rose-700" };
+    case "R":   return { label: "Riposo",    cls: "bg-gray-100 text-gray-700" };
+    default:    return { label: j,           cls: "bg-slate-100 text-slate-700" };
   }
 }
 
@@ -69,12 +70,12 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // selezione giorno (apertura dettagli)
+  // selezione giorno
   const [openId, setOpenId] = useState<string | null>(null);
 
   const { lastDay, mondayIndex, totalCells } = useMemo(() => monthMeta(yyyymm), [yyyymm]);
 
-  /* Realtime Firestore sul mese */
+  /* Realtime Firestore sul mese (include metadati per passare a "server" appena arriva) */
   useEffect(() => {
     setLoading(true);
     setErr(null);
@@ -90,6 +91,7 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
 
     const unsub = onSnapshot(
       q,
+      { includeMetadataChanges: true },
       (snap) => {
         const out: Record<string, DayDoc> = {};
         snap.forEach((d) => (out[d.id] = d.data() as DayDoc));
@@ -105,35 +107,87 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
     return () => unsub();
   }, [userId, yyyymm]);
 
+  /* Revalidazione automatica: on mount, on focus, ogni 60s (server-first se disponibile) */
+  useEffect(() => {
+    let active = true;
+    const col = collection(db, "timesheets", userId, "days");
+    const start = `${yyyymm}-01`;
+    const end = `${yyyymm}-31`;
+    const qy = query(
+      col,
+      where(documentId(), ">=", start),
+      where(documentId(), "<=", end)
+    );
+
+    async function revalidateFromServer() {
+      try {
+        // Prova ad usare getDocsFromServer se disponibile; fallback a getDocs
+        // @ts-ignore
+        const getDocsFromServer = (await import("firebase/firestore")).getDocsFromServer as
+          | ((q: any) => Promise<any>)
+          | undefined;
+
+        const snap = getDocsFromServer ? await getDocsFromServer(qy) : await getDocs(qy);
+        if (!active) return;
+
+        const fresh: Record<string, DayDoc> = {};
+        snap.forEach((d: any) => (fresh[d.id] = d.data() as DayDoc));
+        setMap((prev) => {
+          const prevKeys = Object.keys(prev);
+          const newKeys = Object.keys(fresh);
+          if (prevKeys.length !== newKeys.length) return fresh;
+          for (const k of newKeys) {
+            const a = prev[k];
+            const b = fresh[k];
+            if (!a || a.just !== b.just || a.ordinary !== b.ordinary || a.overtime !== b.overtime) {
+              return fresh;
+            }
+          }
+          return prev;
+        });
+      } catch {
+        // se offline o errori, ci pensa onSnapshot quando torna la rete
+      }
+    }
+
+    // on mount
+    revalidateFromServer();
+
+    // on focus
+    const onVis = () => {
+      if (document.visibilityState === "visible") revalidateFromServer();
+    };
+    document.addEventListener("visibilitychange", onVis);
+
+    // ogni 60s
+    const iv = setInterval(revalidateFromServer, 60000);
+
+    return () => {
+      active = false;
+      document.removeEventListener("visibilitychange", onVis);
+      clearInterval(iv);
+    };
+  }, [userId, yyyymm]);
+
   /* Totali mese live: ignorano i giorni con giustificativo */
   const { sumOrd, sumOt } = useMemo(() => {
     let o = 0;
     let s = 0;
     Object.values(map).forEach((v) => {
-      if (v.just) return; // se giustificato, non sommare
+      if (v.just) return;
       if (typeof v.ordinary === "number") o += v.ordinary;
       if (typeof v.overtime === "number") s += v.overtime;
     });
     return { sumOrd: o, sumOt: s };
   }, [map]);
 
-  /* Stato del giorno selezionato */
   const selected = openId ? map[openId] ?? {} : null;
   const selectedDayNum = openId ? Number(openId.slice(8, 10)) : null;
-
-  /* Chiudi su ESC */
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpenId(null);
-    }
-    if (openId) window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [openId]);
 
   /* Render */
   return (
     <div className="p-3 sm:p-4">
-      {/* Barra totali sticky (sempre visibile, mobile-friendly) */}
+      {/* Barra totali sticky */}
       <div className="sticky top-0 z-10 mb-3">
         <div className="rounded-xl border bg-white/90 backdrop-blur px-3 py-2 flex items-center justify-between text-xs sm:text-sm">
           <div className="font-medium">Anteprima · {yyyymm}</div>
@@ -146,14 +200,14 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
         {err && <div className="mt-1 text-[11px] text-red-600">{err}</div>}
       </div>
 
-      {/* intestazione giorni */}
+      {/* Intestazione giorni */}
       <div className="grid grid-cols-7 gap-1 sm:gap-2 text-[10px] sm:text-xs font-medium text-slate-600 mb-1 sm:mb-2">
         {DOW_LABELS.map((d) => (
           <div key={d} className="px-1.5 py-1 text-center truncate">{d}</div>
         ))}
       </div>
 
-      {/* griglia mese (mobile-first, leggibile) */}
+      {/* Griglia mese */}
       <div className="grid grid-cols-7 gap-1 sm:gap-2">
         {Array.from({ length: totalCells }).map((_, idx) => {
           const dayNum = idx - mondayIndex + 1;
@@ -187,13 +241,11 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
               className={`rounded-lg border h-20 sm:h-24 p-2 flex flex-col justify-between outline-none focus:ring-2 focus:ring-sky-300 ${cellTone}`}
               aria-label={`Apri dettagli ${id}`}
             >
-              {/* top bar: numero giorno a destra */}
               <div className="flex items-center justify-between">
                 <span className="text-xs text-slate-400"></span>
                 <span className="text-xs sm:text-sm font-semibold">{String(dayNum).padStart(2, "0")}</span>
               </div>
 
-              {/* contenuto centrato e compatto */}
               {row.just ? (
                 <span className={`block text-center px-1 py-0.5 rounded-full text-[11px] ${jb?.cls} truncate`}>
                   {jb?.label}
@@ -220,15 +272,13 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
         })}
       </div>
 
-      {/* ===== Bottom Sheet: dettagli giorno ===== */}
+      {/* Bottom Sheet: dettagli giorno */}
       {openId && (
         <div className="fixed inset-0 z-[70]">
-          {/* backdrop */}
           <div
             className="absolute inset-0 bg-black/40 backdrop-blur-sm"
             onClick={() => setOpenId(null)}
           />
-          {/* sheet */}
           <div className="absolute inset-x-0 bottom-0 bg-white rounded-t-2xl shadow-xl p-4 sm:p-6 border-t">
             <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-slate-200" />
             <div className="flex items-center justify-between">
@@ -275,8 +325,6 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
               </div>
             </div>
 
-            {/* Suggerimento opzionale: per portarti rapidamente a quel giorno nella pagina principale,
-                intercettiamo un evento custom che la pagina può ascoltare (non obbligatorio). */}
             <div className="mt-4 flex items-center justify-between gap-2">
               <small className="text-slate-500">
                 Tocca una cella per aprire i dettagli del giorno.
@@ -284,8 +332,6 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
               <button
                 className="px-3 py-1.5 rounded-md border bg-white hover:bg-slate-50 text-sm"
                 onClick={() => {
-                  // Evento custom: la pagina principale può ascoltarlo per impostare la data
-                  // window.addEventListener("timesheet:pick-day", e => { const id=(e as CustomEvent).detail.id })
                   const ev = new CustomEvent("timesheet:pick-day", { detail: { id: openId, day: selectedDayNum } });
                   window.dispatchEvent(ev);
                   setOpenId(null);
