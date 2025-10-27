@@ -17,14 +17,25 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { motion } from "framer-motion";
 import { WORKERS } from "./workers";
+import MonthlyPreview from "@/components/MonthlyPreview";
+import { upsertDay } from "@/lib/timesheet";
 
+/* ================== HELPER: fetch con timeout ================== */
+async function fetchWithTimeout(input: RequestInfo, init: RequestInit = {}, ms = 8000) {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(input, { ...init, signal: ctrl.signal });
+    return res;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+/* ===== COSTANTI ESISTENTI (GAS) ===== */
 const GAS_ENDPOINT =
   process.env.NEXT_PUBLIC_GAS_ENDPOINT ||
   "https://script.google.com/macros/s/AKfycbx2cyiFykEvzA5NcRK5Cr2lb4EMOHoJUG7CWJkh06HUUEoKsMzB_wqpcZPZ0vomnIqKjw/exec";
-
-const PREVIEW_PROXY =
-  process.env.NEXT_PUBLIC_PREVIEW_PROXY ||
-  "https://script.google.com/macros/s/AKfycby6yubXKGcNRdC-mmHYM5-yRhhT9Ftsk6pSMX5Txig7JZ25uwNOoWdSnV0gL8OeGEyQ6A/exec";
 
 const SHEET_NAME = "STRAORDINARIO E GIUSTIFICATIVI";
 const PRESENZE_TAB = "FOGLIO PRESENZE DIGITALE";
@@ -172,7 +183,7 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 12, 0, 0, 0);
   const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 12, 0, 0, 0);
   const monthStartISO = new Date(monthStart.getTime() - monthStart.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-  const monthEndISO = new Date(monthEnd.getTime() - monthEnd.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const monthEndISO   = new Date(monthEnd.getTime()   - monthEnd.getTimezoneOffset()   * 60000).toISOString().slice(0, 10);
 
   // state
   const [today, setToday] = useState(() => {
@@ -180,6 +191,13 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
     d.setHours(12, 0, 0, 0);
     return d;
   });
+
+  // userId normalizzato esattamente come in scrittura Firestore
+  const userId = (auth.currentUser?.uid || userEmail).toLowerCase();
+
+  // yyyymm per la preview
+  const yyyymm = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+
   const [ordinario, setOrdinario] = useState<string | undefined>(() =>
     getDefaultOrdForDate(profilo, new Date())
   );
@@ -187,7 +205,7 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
   const [manualHours, setManualHours] = useState<string>("");
 
   const [startTime, setStartTime] = useState<string>(() => getDefaultTimesForDate(profilo, new Date()).start);
-  const [endTime, setEndTime] = useState<string>(() => getDefaultTimesForDate(profilo, new Date()).end);
+  const [endTime, setEndTime]     = useState<string>(() => getDefaultTimesForDate(profilo, new Date()).end);
 
   const [sedeStraord, setSedeStraord] = useState<string>("Corte D'Appello");
   const [straordinario, setStraordinario] = useState("");
@@ -201,22 +219,8 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [saveOk, setSaveOk] = useState(false);
 
-  // overlay ANTEPRIMA fullscreen
+  // overlay ANTEPRIMA calendario
   const [showPreview, setShowPreview] = useState(false);
-  const [previewSrc, setPreviewSrc] = useState<string | null>(null);
-  const [loadingPreview, setLoadingPreview] = useState(false);
-  const [previewErr, setPreviewErr] = useState<string | null>(null);
-
-  // overlay elaborazione anteprima
-  const [previewProcessing, setPreviewProcessing] = useState(false);
-  const [previewElapsedMs, setPreviewElapsedMs] = useState(0);
-
-  // Zoom (50%–200%)
-  const [zoomPct, setZoomPct] = useState(100);
-  const minZoom = 50;
-  const maxZoom = 200;
-  const stepZoom = 10;
-  const applyZoom = (v: number) => setZoomPct(Math.min(maxZoom, Math.max(minZoom, Math.round(v))));
 
   // riga foglio personale
   const riga = useMemo(() => 4 + today.getDate(), [today]);
@@ -262,7 +266,9 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
   // NOTE dinamiche
   useEffect(() => {
     if (ordinario === "M") {
-      if (!note.toLowerCase().startsWith(PROT_PREFIX.toLowerCase())) setNote(PROT_PREFIX);
+      if (!note.toLowerCase().startsWith(OT_PREFIX.toLowerCase()) && !note.toLowerCase().startsWith(PROT_PREFIX.toLowerCase())) {
+        setNote(PROT_PREFIX);
+      }
       return;
     }
     if (giust) {
@@ -320,26 +326,22 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
     return () => clearInterval(id);
   }, [saving]);
 
-  // timer overlay anteprima
-  useEffect(() => {
-    if (!previewProcessing) return;
-    setPreviewElapsedMs(0);
-    const start = Date.now();
-    const id = setInterval(() => setPreviewElapsedMs(Date.now() - start), 100);
-    return () => clearInterval(id);
-  }, [previewProcessing]);
-
   // ==== SALVA ====
   async function inviaDati() {
-    try {
-      setErr(null);
-      setStatus(null);
-      setSaveOk(false);
-      setSaving(true);
+    setErr(null);
+    setStatus(null);
+    setSaveOk(false);
+    setSaving(true);
 
+    // WATCHDOG: forza la chiusura dell’overlay dopo 12s
+    const watchdog = setTimeout(() => {
+      setSaveOk(false);
+      setSaving(false);
+    }, 12000);
+
+    try {
       if (today < monthStart || today > monthEnd) {
         setErr("Puoi salvare solo per il mese corrente.");
-        setSaving(false);
         return;
       }
 
@@ -348,45 +350,37 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
       if (manualMode && !giust) {
         if (manualHoursError || timesError) {
           setErr("Compila correttamente ore (H,MM) e orari (HH:MM).");
-          setSaving(false);
           return;
         }
         valueOrdinario = manualHours;
       }
 
-      if (ordinario === "M") {
-        if (protocolError) {
-          setErr('Inserisci il numero: "Protocollo malattia n° 123456789" (9 cifre).');
-          setSaving(false);
-          return;
-        }
+      if (ordinario === "M" && protocolError) {
+        setErr('Inserisci il numero: "Protocollo malattia n° 123456789" (9 cifre).');
+        return;
       }
 
       if (straordinario) {
         if (giust || ordinario === "M") {
           setErr("Con un giustificativo selezionato non puoi inserire ore di straordinario.");
-          setSaving(false);
           return;
         }
         if (overtimeNotesError) {
           setErr('Con ore straordinario inserite, scrivi nelle note: "Straordinario ore HH:MM-HH:MM".');
-          setSaving(false);
           return;
         }
         if (!isValidOvertime(straordinario)) {
           setErr("Formato straordinario non valido. Usa es. 0.30, 1.00, 1.30");
-          setSaving(false);
           return;
         }
       }
 
       if (!valueOrdinario) {
         setErr("Seleziona un valore per Ordinario/Giustificativo.");
-        setSaving(false);
         return;
       }
 
-      // 1) scrive sul foglio personale
+      // ========= 1) SCRITTURA SU GAS (FOGLIO) =========
       const writes: { range: string; value: any }[] = [];
       const dayRow = 4 + today.getDate();
       writes.push({ range: toA1("D", dayRow), value: valueOrdinario });
@@ -394,11 +388,11 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
       writes.push({ range: toA1("F", dayRow), value: straordinario || "" });
       writes.push({ range: toA1("L", dayRow), value: note || "" });
 
-      // 2) FOGLIO PRESENZE (solo se non giustificativo)
+      // FOGLIO PRESENZE (solo se non giustificativo)
       if (!giust) {
         const day = today.getDate();
         const rowCE = 11 + day;
-        const rangeIn  = `${PRESENZE_TAB}!C${rowCE}`;
+        const rangeIn = `${PRESENZE_TAB}!C${rowCE}`;
         const rangeOut = `${PRESENZE_TAB}!E${rowCE}`;
         const inOk = !!startTime && timeRe.test(startTime);
         const outOk = !!endTime && timeRe.test(endTime);
@@ -414,87 +408,91 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
         }
       }
 
-      // invio
-      const res = await fetch(GAS_ENDPOINT, {
-        method: "POST",
-        body: JSON.stringify({ sheetId: profilo.sheetId, secret: SECRET, writes }),
-      });
+      const res = await fetchWithTimeout(
+        GAS_ENDPOINT,
+        { method: "POST", body: JSON.stringify({ sheetId: (profilo as any).sheetId, secret: SECRET, writes }) },
+        10000
+      );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
+      const json = await res.json().catch(() => ({ ok: true }));
       if (!json?.ok) throw new Error(json?.error || "Errore sconosciuto lato server");
 
-      // 3) sincronizzazione Piano Ferie
+      // ========= 2) SYNC PIANO FERIE SU GAS (NON BLOCCANTE) =========
       const ymd = toYmdLocal(today);
-      if (valueOrdinario === "F" || valueOrdinario === "ROL") {
-        const entry = {
-          email: userEmail,
-          nome: profilo?.nome || "",
-          cognome: profilo?.cognome || "",
-          date: ymd,
-          tipo: valueOrdinario === "F" ? "FERIE" : "ROL",
-          note: note || "",
-        };
-        const resPlan = await fetch(GAS_ENDPOINT, {
-          method: "POST",
-          body: JSON.stringify({ action: "savePlan", secret: SECRET, entries: [entry] }),
-        });
-        if (!resPlan.ok) throw new Error(`HTTP ${res.status}`);
-        const planJson = await resPlan.json();
-        if (!planJson?.ok) throw new Error(planJson?.error || "Errore salvataggio piano");
-      } else {
-        const resDel = await fetch(GAS_ENDPOINT, {
-          method: "POST",
-          body: JSON.stringify({
-            action: "deletePlan",
-            secret: SECRET,
-            items: [
-              { email: userEmail, date: ymd, tipo: "FERIE" },
-              { email: userEmail, date: ymd, tipo: "ROL" },
-            ],
-          }),
-        });
-        if (!resDel.ok) throw new Error(`HTTP ${resDel.status}`);
-        const delJson = await resDel.json();
-        if (!delJson?.ok) throw new Error(delJson?.error || "Errore update piano");
-      }
+      (async () => {
+        try {
+          if (valueOrdinario === "F" || valueOrdinario === "ROL") {
+            const entry = {
+              email: userEmail,
+              nome: profilo?.nome || "",
+              cognome: profilo?.cognome || "",
+              date: ymd,
+              tipo: valueOrdinario === "F" ? "FERIE" : "ROL",
+              note: note || "",
+            };
+            const resPlan = await fetchWithTimeout(
+              GAS_ENDPOINT,
+              { method: "POST", body: JSON.stringify({ action: "savePlan", secret: SECRET, entries: [entry] }) },
+              8000
+            );
+            if (!resPlan.ok) throw new Error(`HTTP ${resPlan.status}`);
+            await resPlan.json().catch(() => ({ ok: true }));
+          } else {
+            const resDel = await fetchWithTimeout(
+              GAS_ENDPOINT,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  action: "deletePlan",
+                  secret: SECRET,
+                  items: [
+                    { email: userEmail, date: ymd, tipo: "FERIE" },
+                    { email: userEmail, date: ymd, tipo: "ROL" },
+                  ],
+                }),
+              },
+              8000
+            );
+            if (!resDel.ok) throw new Error(`HTTP ${resDel.status}`);
+            await resDel.json().catch(() => ({ ok: true }));
+          }
+        } catch (e) {
+          console.warn("Sync piano ferie fallita/timeout:", e);
+        }
+      })().catch(() => void 0);
 
-      // successo: spunta
+      // ========= 3) SCRITTURA SU FIRESTORE =========
+      // Se è un giustificativo: salvo JUST e AZZERO ore.
+      // Se sono ore: salvo ORD/OT e AZZERO JUST.
+      const isJust = isGiustificativo(valueOrdinario);
+      const ordDec = !isJust ? (parseHoursComma(valueOrdinario!) ?? null) : null;
+      const otDec  = !isJust ? (straordinario ? Number(straordinario) : null) : null;
+      const just   = isJust ? valueOrdinario! : null;
+
+      // Scrivo SEMPRE tutti e 3 i campi (null quando vanno azzerati)
+      const dayPatch: any = {
+        just,                 // string | null
+        ordinary: ordDec,     // number | null
+        overtime: otDec,      // number | null
+      };
+
+      await upsertDay(userId, ymd, dayPatch);
+
+      // successo
       setSaveOk(true);
       setStatus("Dati salvati correttamente.");
-      setTimeout(() => {
-        setSaveOk(false);
-        setSaving(false);
-      }, 1200);
     } catch (e: any) {
       setErr(e?.message || String(e));
       setStatus(null);
-      setSaving(false);
-      setSaveOk(false);
-    }
-  }
-
-  async function caricaAnteprimaPdf() {
-    try {
-      setPreviewProcessing(true);
-      setLoadingPreview(true);
-      setPreviewErr(null);
-      const sheetGid = (profilo as any).sheetGid ?? 0;
-      const url = `${PREVIEW_PROXY}?sheetId=${encodeURIComponent(profilo.sheetId)}&gid=${encodeURIComponent(String(sheetGid))}`;
-      const res = await fetch(url, { method: "GET" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error || "Errore proxy anteprima");
-      const dataUrl = `data:${json.mime};base64,${json.data}`;
-      setPreviewSrc(dataUrl);
-    } catch (e: any) {
-      setPreviewErr(e?.message || String(e));
-      setPreviewSrc(null);
     } finally {
-      setLoadingPreview(false);
-      setTimeout(() => setPreviewProcessing(false), 200);
+      // chiudi SUBITO l’elaborazione; se c’è la spunta ok, la teniamo 0.8s
+      setSaving(false);
+      setTimeout(() => setSaveOk(false), 800);
+      clearTimeout(watchdog);
     }
   }
 
+  // EARLY RETURNS per stato profilo
   if (!profilo) {
     return (
       <div className="min-h-screen grid place-items-center bg-amber-50 p-4">
@@ -512,34 +510,31 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
   }
 
   const badge = giustificativoBadge(ordinario);
-  const seconds = (elapsedMs / 1000).toFixed(1);
-  const previewSeconds = (previewElapsedMs / 1000).toFixed(1);
-  const iframeSrc = previewSrc ? `${previewSrc}#zoom=${zoomPct}` : undefined;
 
   return (
     <div className="min-h-screen bg-white">
       {/* HEADER */}
       <header className="sticky top-0 z-40 bg-white/90 backdrop-blur supports-[backdrop-filter]:bg-white/70 border-b shadow-sm">
-  <div className="p-4 sm:p-6">
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div className="flex items-center gap-3">
-        <h1 className="text-lg sm:text-xl md:text-2xl font-semibold">Foglio Presenze</h1>
-      </div>
-      <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
-        <Button variant="secondary" onClick={() => (window.location.href = "/ferie")} className="w-full sm:w-auto">
-          Piano Ferie
-        </Button>
-        <div className="text-left sm:text-right">
-          <p className="text-sm">{profilo.nome} {profilo.cognome}</p>
-          <p className="text-xs text-slate-500 break-all">{userEmail}</p>
+        <div className="p-4 sm:p-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              <h1 className="text-lg sm:text-xl md:text-2xl font-semibold">Foglio Presenze</h1>
+            </div>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+              <Button variant="secondary" onClick={() => (window.location.href = "/ferie")} className="w-full sm:w-auto">
+                Piano Ferie
+              </Button>
+              <div className="text-left sm:text-right">
+                <p className="text-sm">{profilo.nome} {profilo.cognome}</p>
+                <p className="text-xs text-slate-500 break-all">{userEmail}</p>
+              </div>
+              <Button variant="secondary" onClick={() => signOut(auth)} className="w-full sm:w-auto">
+                Esci
+              </Button>
+            </div>
+          </div>
         </div>
-        <Button variant="secondary" onClick={() => signOut(auth)} className="w-full sm:w-auto">
-          Esci
-        </Button>
-      </div>
-    </div>
-  </div>
-</header>
+      </header>
 
       <main className="max-w-3xl mx-auto p-4 sm:p-6 md:p-8">
         <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}>
@@ -752,32 +747,21 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
                   value={note}
                   onChange={(e) => setNote(e.target.value)}
                 />
-                {protocolError && <p className="text-xs text-red-600">{protocolError}</p>}
-                {!protocolError && overtimeNotesError && (
-                  <p className="text-xs text-red-600">{overtimeNotesError}</p>
-                )}
+                {dateErr && <p className="text-xs text-red-600">{dateErr}</p>}
               </div>
 
               {/* Azioni – DESKTOP/TABLET (>= sm) */}
               <div className="hidden sm:flex flex-wrap items-center gap-2 sm:gap-3 pt-2">
                 <Button onClick={inviaDati} disabled={hasBlockingErrors || saving}>
-                  Salva nel foglio
+                  Salva giorno
                 </Button>
 
                 <Button
                   variant="secondary"
-                  onClick={async () => {
-                    if (!showPreview) {
-                      setZoomPct(100);
-                      await caricaAnteprimaPdf();
-                      setShowPreview(true);
-                    } else {
-                      setShowPreview(false);
-                    }
-                  }}
+                  onClick={() => setShowPreview((v) => !v)}
                   disabled={saving}
                 >
-                  {showPreview ? "Chiudi anteprima" : "Mostra anteprima"}
+                  {showPreview ? "Chiudi anteprima" : "Anteprima"}
                 </Button>
 
                 <Button variant="secondary" onClick={() => (window.location.href = "/ferie")} disabled={saving}>
@@ -810,15 +794,7 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
           <Button
             size="sm"
             variant="secondary"
-            onClick={async () => {
-              if (!showPreview) {
-                setZoomPct(100);
-                await caricaAnteprimaPdf();
-                setShowPreview(true);
-              } else {
-                setShowPreview(false);
-              }
-            }}
+            onClick={() => setShowPreview((v) => !v)}
             disabled={saving}
             className="w-full"
           >
@@ -850,7 +826,7 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
               <>
                 <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-slate-200 border-t-slate-600" />
                 <p className="text-lg font-medium">Elaborazione…</p>
-                <p className="text-sm text-slate-600 mt-1">Tempo: {seconds}s</p>
+                <p className="text-sm text-slate-600 mt-1">Tempo: {(elapsedMs / 1000).toFixed(1)}s</p>
               </>
             ) : (
               <>
@@ -866,102 +842,30 @@ function WorkerPage({ userEmail }: { userEmail: string }) {
         </div>
       )}
 
-      {/* Overlay ANTEPRIMA FULLSCREEN */}
+      {/* Overlay ANTEPRIMA CALENDARIO */}
       {showPreview && (
         <div className="fixed inset-0 z-[60] flex flex-col bg-black/60 backdrop-blur-sm">
           {/* Top bar */}
           <div className="flex items-center justify-between gap-2 px-4 sm:px-6 py-3 bg-white/95 border-b">
             <div className="flex items-center gap-2">
               <span className="inline-block h-2 w-2 rounded-full bg-emerald-500" />
-              <span className="text-sm sm:text-base font-medium">Anteprima foglio (PDF)</span>
-            </div>
-
-            {/* Zoom controls */}
-            <div className="flex items-center gap-2">
-              <Button
-                variant="secondary"
-                className="h-8 px-2"
-                onClick={() => applyZoom(zoomPct - stepZoom)}
-                disabled={!previewSrc}
-                title="Zoom out"
-              >
-                −
-              </Button>
-              <Button
-                variant="secondary"
-                className="h-8 px-3"
-                onClick={() => applyZoom(100)}
-                disabled={!previewSrc}
-                title="Reset zoom"
-              >
-                {zoomPct}%
-              </Button>
-              <Button
-                variant="secondary"
-                className="h-8 px-2"
-                onClick={() => applyZoom(zoomPct + stepZoom)}
-                disabled={!previewSrc}
-                title="Zoom in"
-              >
-                +
-              </Button>
+              <span className="text-sm sm:text-base font-medium">Anteprima mese corrente</span>
             </div>
 
             <div className="flex items-center gap-2">
-              {previewSrc && (
-                <a href={previewSrc} download="anteprima.pdf" className="text-sm underline">
-                  Scarica PDF
-                </a>
-              )}
               <Button variant="secondary" onClick={() => setShowPreview(false)} className="py-1 h-9">
                 ✕ Chiudi
               </Button>
             </div>
           </div>
 
-          {/* Content */}
+          {/* Contenuto: calendario */}
           <div className="flex-1 p-2 sm:p-4">
-            <div className="w-full h-full bg-white rounded-lg overflow-hidden shadow relative">
-              {previewSrc && !previewErr && (
-                <iframe
-                  key={zoomPct}
-                  src={iframeSrc}
-                  className="w-full h-[calc(100vh-64px-16px)] sm:h-[calc(100vh-64px-24px)]"
-                  title="Anteprima foglio (PDF)"
-                />
-              )}
-
-              {!previewSrc && !previewErr && (
-                <div className="w-full h-full grid place-items-center p-4">
-                  <p className="text-sm text-slate-600">Nessuna anteprima disponibile.</p>
-                </div>
-              )}
-
-              {previewErr && (
-                <div className="w-full h-full grid place-items-center p-4">
-                  <div className="text-center">
-                    <p className="text-sm text-red-600">Errore anteprima: {previewErr}</p>
-                    <div className="mt-3">
-                      <Button variant="secondary" onClick={() => { void caricaAnteprimaPdf(); }}>
-                        Riprova
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              )}
+            <div className="w-full h-full bg-white rounded-lg overflow-auto shadow relative">
+              {/* >>> Passo userId & yyyymm: la preview ascolta Firestore in tempo reale */}
+              <MonthlyPreview userId={userId} yyyymm={yyyymm} />
             </div>
           </div>
-
-          {/* Overlay elaborazione anteprima */}
-          {(previewProcessing || loadingPreview) && (
-            <div className="fixed inset-0 z-[70] grid place-items-center bg-black/30 backdrop-blur-sm">
-              <div className="bg-white rounded-2xl shadow-xl p-6 sm:p-8 w-[90%] max-w-sm text-center">
-                <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-slate-200 border-t-slate-600" />
-                <p className="text-lg font-medium">Elaborazione anteprima…</p>
-                <p className="text-sm text-slate-600 mt-1">Tempo: {previewSeconds}s</p>
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>
