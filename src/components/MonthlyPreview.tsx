@@ -1,270 +1,215 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
-import { db } from "@/app/firebase";
-import {
-  collection,
-  onSnapshot,
-  query,
-  where,
-  documentId,
-  Timestamp,
-  getDocs,
-} from "firebase/firestore";
+import { listPresenceMonth } from "@/lib/masterPresence";
 
-/* ===== Tipi ===== */
-type DayDoc = {
-  ordinary?: number;        // ore ordinarie (decimali)
-  overtime?: number;        // ore straordinarie (decimali)
-  just?: string | null;     // giustificativo (es. "F", "ROL", "M", ...)
-  updatedAt?: Timestamp;
-  source?: "app";
+type PresenceDay = {
+  email: string;
+  date: string;             // "YYYY-MM-DD"
+  just?: string | null;     // F, ROL, M, FES, FP, L104, R
+  ordinary?: number | null; // ore in decimale (es: 7.5)
+  overtime?: number | null; // ore in decimale (es: 1.5)
+  start?: string | null;    // "HH:MM" (NON visualizziamo)
+  end?: string | null;      // "HH:MM" (NON visualizziamo)
+  note?: string | null;
 };
 
-type Props = {
-  userId: string;   // uid Firebase
-  yyyymm: string;   // "YYYY-MM"
-};
-
-/* ===== Utils ===== */
-const DOW_LABELS = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"];
-
-function fmt(n?: number | null, showZero = false) {
-  if (typeof n !== "number" || Number.isNaN(n)) return showZero ? "0,00" : "";
-  if (!showZero && Math.abs(n) < 1e-9) return "";
-  return n.toFixed(2).replace(".", ",");
+function daysInMonth(y: number, m0: number) {
+  return new Date(y, m0 + 1, 0).getDate();
+}
+function pad2(n: number) {
+  return String(n).padStart(2, "0");
+}
+function formatDecimiIT(n: number | null | undefined) {
+  if (n == null || Number.isNaN(n)) return "";
+  // decimi → 1 cifra decimale
+  return n.toFixed(1).replace(".", ",");
 }
 
-function monthMeta(yyyymm: string) {
-  const y = Number(yyyymm.slice(0, 4));
-  const m = Number(yyyymm.slice(5, 7)); // 1..12
-  const first = new Date(y, m - 1, 1, 12, 0, 0, 0);
-  const lastDay = new Date(y, m, 0, 12, 0, 0, 0).getDate();
-  // JS: 0=Dom → 0=Lun,...6=Dom
-  const mondayIndex = (first.getDay() + 6) % 7;
-  const totalCells = Math.ceil((mondayIndex + lastDay) / 7) * 7;
-  return { y, m, lastDay, mondayIndex, totalCells };
-}
-
-function justBadge(j?: string | null) {
-  if (!j) return null;
-  switch (j) {
-    case "F":   return { label: "Ferie",     cls: "bg-blue-100 text-blue-700" };
-    case "M":   return { label: "Malattia",  cls: "bg-green-100 text-green-700" };
-    case "ROL": return { label: "ROL",       cls: "bg-sky-100 text-sky-700" };
-    case "L104":return { label: "L.104",     cls: "bg-orange-100 text-orange-700" };
-    case "FES": return { label: "Festivo",   cls: "bg-red-100 text-red-700" };
-    case "FP":  return { label: "Patronale", cls: "bg-rose-100 text-rose-700" };
-    case "R":   return { label: "Riposo",    cls: "bg-gray-100 text-gray-700" };
-    default:    return { label: j,           cls: "bg-slate-100 text-slate-700" };
-  }
-}
-
-function ymd(yyyymm: string, day: number) {
-  return `${yyyymm}-${String(day).padStart(2, "0")}`;
-}
-
-/* ===== Componente ===== */
-export default function MonthlyPreview({ userId, yyyymm }: Props) {
-  const [map, setMap] = useState<Record<string, DayDoc>>({});
-  const [loading, setLoading] = useState(true);
+export default function MonthlyPreview({
+  email,
+  yyyymm,
+  refreshToken,      // facoltativo: quando cambia, ricarica i dati
+}: {
+  email: string;
+  yyyymm: string; // "YYYY-MM"
+  refreshToken?: number | string;
+}) {
+  const [rows, setRows] = useState<PresenceDay[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  // selezione giorno
-  const [openId, setOpenId] = useState<string | null>(null);
+  // dettaglio giorno (modal)
+  const [openDetail, setOpenDetail] = useState<PresenceDay | null>(null);
 
-  const { lastDay, mondayIndex, totalCells } = useMemo(() => monthMeta(yyyymm), [yyyymm]);
+  // parse yyyymm
+  const [Y, M] = yyyymm.split("-").map(Number);
+  const y = Y;
+  const m0 = M - 1; // 0-based
+  const totalDays = daysInMonth(y, m0);
 
-  /* Realtime Firestore sul mese (include metadati per passare a "server" appena arriva) */
+  // Lunedì come primo giorno
+  const firstDow = new Date(y, m0, 1).getDay(); // 0=Dom ... 6=Sab
+  const startOffset = (firstDow + 6) % 7; // Lun=0
+
+  // carica dati mese
   useEffect(() => {
-    setLoading(true);
-    setErr(null);
-
-    const start = `${yyyymm}-01`;
-    const end = `${yyyymm}-31`;
-    const col = collection(db, "timesheets", userId, "days");
-    const q = query(
-      col,
-      where(documentId(), ">=", start),
-      where(documentId(), "<=", end)
-    );
-
-    const unsub = onSnapshot(
-      q,
-      { includeMetadataChanges: true },
-      (snap) => {
-        const out: Record<string, DayDoc> = {};
-        snap.forEach((d) => (out[d.id] = d.data() as DayDoc));
-        setMap(out);
-        setLoading(false);
-      },
-      (e) => {
-        setErr(e?.message || String(e));
-        setLoading(false);
-      }
-    );
-
-    return () => unsub();
-  }, [userId, yyyymm]);
-
-  /* Revalidazione automatica: on mount, on focus, ogni 60s (server-first se disponibile) */
-  useEffect(() => {
-    let active = true;
-    const col = collection(db, "timesheets", userId, "days");
-    const start = `${yyyymm}-01`;
-    const end = `${yyyymm}-31`;
-    const qy = query(
-      col,
-      where(documentId(), ">=", start),
-      where(documentId(), "<=", end)
-    );
-
-    async function revalidateFromServer() {
+    let mounted = true;
+    (async () => {
       try {
-        // Prova ad usare getDocsFromServer se disponibile; fallback a getDocs
-        // @ts-ignore
-        const getDocsFromServer = (await import("firebase/firestore")).getDocsFromServer as
-          | ((q: any) => Promise<any>)
-          | undefined;
-
-        const snap = getDocsFromServer ? await getDocsFromServer(qy) : await getDocs(qy);
-        if (!active) return;
-
-        const fresh: Record<string, DayDoc> = {};
-        snap.forEach((d: any) => (fresh[d.id] = d.data() as DayDoc));
-        setMap((prev) => {
-          const prevKeys = Object.keys(prev);
-          const newKeys = Object.keys(fresh);
-          if (prevKeys.length !== newKeys.length) return fresh;
-          for (const k of newKeys) {
-            const a = prev[k];
-            const b = fresh[k];
-            if (!a || a.just !== b.just || a.ordinary !== b.ordinary || a.overtime !== b.overtime) {
-              return fresh;
-            }
-          }
-          return prev;
-        });
-      } catch {
-        // se offline o errori, ci pensa onSnapshot quando torna la rete
+        setErr(null);
+        setLoading(true);
+        const data = await listPresenceMonth(email, yyyymm);
+        if (!mounted) return;
+        setRows(data);
+      } catch (e: any) {
+        if (!mounted) return;
+        setErr(e?.message || String(e));
+      } finally {
+        if (mounted) setLoading(false);
       }
-    }
-
-    // on mount
-    revalidateFromServer();
-
-    // on focus
-    const onVis = () => {
-      if (document.visibilityState === "visible") revalidateFromServer();
-    };
-    document.addEventListener("visibilitychange", onVis);
-
-    // ogni 60s
-    const iv = setInterval(revalidateFromServer, 60000);
-
+    })();
     return () => {
-      active = false;
-      document.removeEventListener("visibilitychange", onVis);
-      clearInterval(iv);
+      mounted = false;
     };
-  }, [userId, yyyymm]);
+    // ricarica se cambia email, mese o refreshToken
+  }, [email, yyyymm, refreshToken]);
 
-  /* Totali mese live: ignorano i giorni con giustificativo */
-  const { sumOrd, sumOt } = useMemo(() => {
+  // indicizzazione per data
+  const map = useMemo(() => {
+    const m = new Map<string, PresenceDay>();
+    rows.forEach((r) => m.set(r.date, r));
+    return m;
+  }, [rows]);
+
+  // costruisci celle
+  const cells: Array<{ label: string; date?: string; data?: PresenceDay }> = [];
+  for (let i = 0; i < startOffset; i++) cells.push({ label: "" });
+  for (let d = 1; d <= totalDays; d++) {
+    const date = `${y}-${pad2(M)}-${pad2(d)}`;
+    const data = map.get(date);
+    cells.push({ label: String(d), date, data });
+  }
+  while (cells.length % 7 !== 0) cells.push({ label: "" });
+
+  // totali mese (decimi)
+  const { totOrd, totOt } = useMemo(() => {
     let o = 0;
-    let s = 0;
-    Object.values(map).forEach((v) => {
-      if (v.just) return;
-      if (typeof v.ordinary === "number") o += v.ordinary;
-      if (typeof v.overtime === "number") s += v.overtime;
-    });
-    return { sumOrd: o, sumOt: s };
-  }, [map]);
+    let t = 0;
+    for (const r of rows) {
+      if (typeof r.ordinary === "number") o += r.ordinary;
+      if (typeof r.overtime === "number") t += r.overtime;
+    }
+    return { totOrd: o, totOt: t };
+  }, [rows]);
 
-  const selected = openId ? map[openId] ?? {} : null;
-  const selectedDayNum = openId ? Number(openId.slice(8, 10)) : null;
+  const weekDays = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"];
 
-  /* Render */
   return (
-    <div className="p-3 sm:p-4">
-      {/* Barra totali sticky */}
-      <div className="sticky top-0 z-10 mb-3">
-        <div className="rounded-xl border bg-white/90 backdrop-blur px-3 py-2 flex items-center justify-between text-xs sm:text-sm">
-          <div className="font-medium">Anteprima · {yyyymm}</div>
-          <div className="font-medium">
-            <span className="mr-3">Ord: <span className="font-mono">{fmt(sumOrd, true)}</span></span>
-            <span>Straord: <span className="font-mono">{fmt(sumOt, true)}</span></span>
-          </div>
+    <div className="p-3">
+      {/* stato caricamento / errore */}
+      {loading && <p className="text-sm text-slate-500 p-2">Caricamento…</p>}
+      {err && <p className="text-sm text-red-600 p-2">Errore anteprima: {err}</p>}
+
+      {/* header con mese + totali */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-2">
+        <h3 className="text-base font-semibold text-slate-800">
+          {new Date(y, m0, 1).toLocaleDateString("it-IT", { month: "long", year: "numeric" })}
+        </h3>
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 text-emerald-700 px-2 py-0.5">
+            <strong>Ord:</strong> {formatDecimiIT(totOrd)}
+          </span>
+          <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-700 px-2 py-0.5">
+            <strong>OT:</strong> {formatDecimiIT(totOt)}
+          </span>
         </div>
-        {loading && <div className="mt-1 text-[11px] text-slate-500">Caricamento…</div>}
-        {err && <div className="mt-1 text-[11px] text-red-600">{err}</div>}
       </div>
 
-      {/* Intestazione giorni */}
-      <div className="grid grid-cols-7 gap-1 sm:gap-2 text-[10px] sm:text-xs font-medium text-slate-600 mb-1 sm:mb-2">
-        {DOW_LABELS.map((d) => (
-          <div key={d} className="px-1.5 py-1 text-center truncate">{d}</div>
+      {/* intestazione giorni settimana */}
+      <div className="grid grid-cols-7 gap-2 text-xs font-medium text-slate-600 mb-2">
+        {weekDays.map((d) => (
+          <div key={d} className="text-center">
+            {d}
+          </div>
         ))}
       </div>
 
-      {/* Griglia mese */}
-      <div className="grid grid-cols-7 gap-1 sm:gap-2">
-        {Array.from({ length: totalCells }).map((_, idx) => {
-          const dayNum = idx - mondayIndex + 1;
-          if (dayNum < 1 || dayNum > lastDay) {
-            return (
-              <div
-                key={`e-${idx}`}
-                className="rounded-lg border border-slate-100 bg-slate-50/40 h-20 sm:h-24"
-              />
-            );
-          }
+      {/* griglia mese */}
+      <div className="grid grid-cols-7 gap-2">
+        {cells.map((c, i) => {
+          const hasContent = Boolean(c.label);
+          const just = c.data?.just ? String(c.data.just) : "";
 
-          const id = ymd(yyyymm, dayNum);
-          const row = map[id] || {};
-          const jb = justBadge(row.just);
-          const hasOrd = typeof row.ordinary === "number" && !row.just;
-          const hasOt  = typeof row.overtime === "number" && !row.just;
+          // badge sinistra: ordinario o giustificativo
+          const leftBadge = (() => {
+            if (!c.data) return null;
+            if (just) {
+              // giustificativo a sinistra
+              const cls =
+                just === "F"
+                  ? "bg-blue-100 text-blue-700"
+                  : just === "M"
+                  ? "bg-green-100 text-green-700"
+                  : just === "ROL"
+                  ? "bg-sky-100 text-sky-700"
+                  : just === "L104"
+                  ? "bg-orange-100 text-orange-700"
+                  : just === "FES"
+                  ? "bg-red-100 text-red-700"
+                  : just === "FP"
+                  ? "bg-rose-100 text-rose-700"
+                  : just === "R"
+                  ? "bg-gray-100 text-gray-700"
+                  : "bg-slate-100 text-slate-700";
+              return { txt: just, cls };
+            }
+            if (typeof c.data.ordinary === "number" && c.data.ordinary > 0) {
+              return { txt: `Ord ${formatDecimiIT(c.data.ordinary)}`, cls: "bg-emerald-100 text-emerald-700" };
+            }
+            return null;
+          })();
 
-          const cellTone =
-            row.just
-              ? "border-slate-200 bg-slate-50"
-              : hasOrd || hasOt
-              ? "border-emerald-100 bg-emerald-50/40"
-              : "border-slate-100 bg-white";
+          // badge destra: straordinario
+          const rightBadge =
+            c.data && typeof c.data.overtime === "number" && c.data.overtime > 0
+              ? { txt: `OT ${formatDecimiIT(c.data.overtime)}`, cls: "bg-amber-100 text-amber-700" }
+              : null;
 
           return (
             <button
-              key={id}
+              key={i}
               type="button"
-              onClick={() => setOpenId(id)}
-              className={`rounded-lg border h-20 sm:h-24 p-2 flex flex-col justify-between outline-none focus:ring-2 focus:ring-sky-300 ${cellTone}`}
-              aria-label={`Apri dettagli ${id}`}
+              disabled={!hasContent}
+              onClick={() => {
+                if (c.data) setOpenDetail(c.data);
+              }}
+              className={`min-h-[82px] rounded-lg border p-2 text-left ${
+                hasContent ? "bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-emerald-400" : "bg-slate-50"
+              }`}
             >
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-slate-400"></span>
-                <span className="text-xs sm:text-sm font-semibold">{String(dayNum).padStart(2, "0")}</span>
+              <div className="flex items-start justify-between">
+                <span className="text-xs font-semibold text-slate-700">{c.label}</span>
+
+                {/* destra: straordinario */}
+                {rightBadge && (
+                  <span className={`text-[10px] px-2 py-0.5 rounded-full ${rightBadge.cls}`}>{rightBadge.txt}</span>
+                )}
               </div>
 
-              {row.just ? (
-                <span className={`block text-center px-1 py-0.5 rounded-full text-[11px] ${jb?.cls} truncate`}>
-                  {jb?.label}
-                </span>
-              ) : (
-                <div className="text-center leading-tight">
-                  {hasOrd && (
-                    <div className="text-[11px] sm:text-xs font-medium text-slate-800">
-                      Ord: {fmt(row.ordinary, true)}
-                    </div>
-                  )}
-                  {hasOt && (
-                    <div className="text-[11px] sm:text-xs font-medium text-slate-800">
-                      Stra: {fmt(row.overtime, true)}
-                    </div>
-                  )}
-                  {!hasOrd && !hasOt && (
-                    <div className="text-[11px] text-slate-300 italic">—</div>
-                  )}
+              {/* sinistra (riga sotto il numero): ordinario/giustificativo */}
+              <div className="mt-1">
+                {leftBadge && (
+                  <span className={`inline-block text-[10px] px-2 py-0.5 rounded-full ${leftBadge.cls}`}>
+                    {leftBadge.txt}
+                  </span>
+                )}
+              </div>
+
+              {/* NOTE (troncate) */}
+              {c.data?.note && (
+                <div className="mt-1 text-[10px] text-slate-500 truncate" title={c.data.note || ""}>
+                  {c.data.note}
                 </div>
               )}
             </button>
@@ -272,73 +217,56 @@ export default function MonthlyPreview({ userId, yyyymm }: Props) {
         })}
       </div>
 
-      {/* Bottom Sheet: dettagli giorno */}
-      {openId && (
-        <div className="fixed inset-0 z-[70]">
-          <div
-            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-            onClick={() => setOpenId(null)}
-          />
-          <div className="absolute inset-x-0 bottom-0 bg-white rounded-t-2xl shadow-xl p-4 sm:p-6 border-t">
-            <div className="mx-auto mb-3 h-1.5 w-12 rounded-full bg-slate-200" />
+      {/* MODAL DETTAGLIO GIORNO */}
+      {openDetail && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50">
+          <div className="bg-white w-[92%] max-w-md rounded-2xl shadow-2xl p-5">
             <div className="flex items-center justify-between">
-              <h4 className="text-base sm:text-lg font-semibold">
-                Dettagli — {openId}
+              <h4 className="text-base font-semibold">
+                Dettaglio — {new Date(openDetail.date + "T12:00:00").toLocaleDateString("it-IT", { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" })}
               </h4>
               <button
-                className="text-slate-600 hover:text-slate-900 text-sm px-2 py-1 rounded-md border"
-                onClick={() => setOpenId(null)}
+                onClick={() => setOpenDetail(null)}
+                className="px-2 py-1 rounded-md border hover:bg-slate-50"
               >
                 Chiudi
               </button>
             </div>
 
-            <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
-              <div className="p-3 rounded-lg border bg-slate-50">
-                <div className="text-[11px] text-slate-500">Tipo</div>
-                {selected?.just ? (
-                  <div className={`mt-1 inline-block px-2 py-0.5 rounded-full text-xs ${justBadge(selected?.just)?.cls}`}>
-                    {justBadge(selected?.just)?.label}
-                  </div>
-                ) : (
-                  <div className="mt-1 font-medium">Lavoro</div>
-                )}
+            <div className="mt-4 space-y-2 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-600">Giustificativo</span>
+                <span className="font-medium">{openDetail.just || "—"}</span>
               </div>
 
-              <div className="p-3 rounded-lg border bg-slate-50">
-                <div className="text-[11px] text-slate-500">Aggiornato</div>
-                <div className="mt-1">
-                  {selected?.updatedAt
-                    ? new Date(selected.updatedAt.toMillis()).toLocaleString()
-                    : "—"}
-                </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-600">Ordinario (h)</span>
+                <span className="font-medium">{formatDecimiIT(openDetail.ordinary ?? null) || "—"}</span>
               </div>
 
-              <div className="p-3 rounded-lg border bg-slate-50">
-                <div className="text-[11px] text-slate-500">Ordinarie</div>
-                <div className="mt-1 font-mono">{selected?.just ? "—" : fmt(selected?.ordinary, true)}</div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-600">Straordinario (h)</span>
+                <span className="font-medium">{formatDecimiIT(openDetail.overtime ?? null) || "—"}</span>
               </div>
 
-              <div className="p-3 rounded-lg border bg-slate-50">
-                <div className="text-[11px] text-slate-500">Straordinarie</div>
-                <div className="mt-1 font-mono">{selected?.just ? "—" : fmt(selected?.overtime, true)}</div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-600">Inizio</span>
+                <span className="font-medium">{openDetail.start || "—"}</span>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <span className="text-slate-600">Fine</span>
+                <span className="font-medium">{openDetail.end || "—"}</span>
+              </div>
+
+              <div>
+                <span className="text-slate-600">Note</span>
+                <p className="mt-1 whitespace-pre-wrap">{openDetail.note || "—"}</p>
               </div>
             </div>
 
-            <div className="mt-4 flex items-center justify-between gap-2">
-              <small className="text-slate-500">
-                Tocca una cella per aprire i dettagli del giorno.
-              </small>
-              <button
-                className="px-3 py-1.5 rounded-md border bg-white hover:bg-slate-50 text-sm"
-                onClick={() => {
-                  const ev = new CustomEvent("timesheet:pick-day", { detail: { id: openId, day: selectedDayNum } });
-                  window.dispatchEvent(ev);
-                  setOpenId(null);
-                }}
-              >
-                Apri questo giorno
-              </button>
+            <div className="mt-5 text-xs text-slate-500">
+              I valori sono salvati nel **master** e riflettono l’ultima sincronizzazione.
             </div>
           </div>
         </div>

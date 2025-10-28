@@ -21,22 +21,28 @@ import MonthlyPreview from "@/components/MonthlyPreview";
 import { upsertDay } from "@/lib/timesheet";
 import { migrateEmailDaysToUid } from "@/lib/migrate";
 
-/* ================== HELPER: fetch con timeout ================== */
-async function fetchWithTimeout(input: RequestInfo, init: RequestInit = {}, ms = 8000) {
+/* ================== HELPER: fetch con timeout (semplice, senza retry) ================== */
+async function fetchWithTimeout(
+  input: RequestInfo,
+  init: RequestInit = {},
+  ms = 15000 // 15s realistici per Apps Script; regola se vuoi
+) {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), ms);
+
   try {
-    const res = await fetch(input, { ...init, signal: ctrl.signal });
+    // niente retry, niente keepalive: una sola chiamata pulita
+    const res = await fetch(input, { ...init, signal: ctrl.signal, redirect: "follow", cache: "no-store" });
     return res;
   } finally {
     clearTimeout(id);
   }
 }
 
-/* ===== COSTANTI ESISTENTI (GAS) ===== */
+/* ===== COSTANTI GAS / APP ===== */
 const GAS_ENDPOINT =
   process.env.NEXT_PUBLIC_GAS_ENDPOINT ||
-  "https://script.google.com/macros/s/AKfycbx2cyiFykEvzA5NcRK5Cr2lb4EMOHoJUG7CWJkh06HUUEoKsMzB_wqpcZPZ0vomnIqKjw/exec";
+  "https://script.google.com/macros/s/AKfycbxOcvGN3V64Rjk3aun2sLdEHKrjFqPTPMLcZM8X00x1N6Hy5DLWTtiLHk6QwA-uAXPOxA/exec";
 
 const SHEET_NAME = "STRAORDINARIO E GIUSTIFICATIVI";
 const PRESENZE_TAB = "FOGLIO PRESENZE DIGITALE";
@@ -313,9 +319,26 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
     return () => clearInterval(id);
   }, [saving]);
 
+  // ============== POST compatibile con GAS (simple request, no preflight) ==============
+  async function saveAll(payload: any) {
+    const res = await fetchWithTimeout(
+      GAS_ENDPOINT,
+      { method: "POST", body: JSON.stringify({ secret: SECRET, action: "saveAll", ...payload }) },
+      25000
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const json = await res.json().catch(() => ({} as any));
+    if (!json?.ok) throw new Error(json?.error || "Errore server");
+    return json;
+  }
+
   async function inviaDati() {
     if (!userUid) {
       setErr("Utente non autenticato.");
+      return;
+    }
+    if (!(profilo as any)?.sheetId) {
+      setErr("Profilo senza sheetId: configura WORKERS per " + userEmail);
       return;
     }
 
@@ -327,7 +350,7 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
     const watchdog = setTimeout(() => {
       setSaveOk(false);
       setSaving(false);
-    }, 12000);
+    }, 15000);
 
     try {
       if (today < monthStart || today > monthEnd) {
@@ -370,7 +393,45 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
         return;
       }
 
-      // ========= 1) SCRITTURA SU GAS (FOGLIO) =========
+      // ========= Componi payload unica chiamata =========
+      const ymd = toYmdLocal(today);
+      const isJust = isGiustificativo(valueOrdinario);
+      const ordDec = !isJust ? (parseHoursComma(valueOrdinario!) ?? null) : null;
+      const otDec  = !isJust ? (straordinario ? Number(straordinario) : null) : null;
+
+      const presencePayload = {
+        email: userEmail,
+        date: ymd,
+        just: isJust ? valueOrdinario : null,
+        ordinary: ordDec,
+        overtime: otDec,
+        start: isJust ? null : (startTime || null),
+        end: isJust ? null : (endTime || null),
+        note: note || null,
+      };
+
+      const planPayload =
+        valueOrdinario === "F" || valueOrdinario === "ROL"
+          ? {
+              op: "UPSERT" as const,
+              items: [
+                {
+                  date: ymd,
+                  tipo: valueOrdinario === "F" ? "FERIE" : "ROL",
+                  nome: profilo?.nome || "",
+                  cognome: profilo?.cognome || "",
+                  note: note || "",
+                },
+              ],
+            }
+          : {
+              op: "DELETE" as const,
+              items: [
+                { date: ymd, tipo: "FERIE" as const },
+                { date: ymd, tipo: "ROL" as const },
+              ],
+            };
+
       const writes: { range: string; value: any }[] = [];
       const dayRow = 4 + today.getDate();
       writes.push({ range: toA1("D", dayRow), value: valueOrdinario });
@@ -378,7 +439,7 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
       writes.push({ range: toA1("F", dayRow), value: straordinario || "" });
       writes.push({ range: toA1("L", dayRow), value: note || "" });
 
-      if (!giust) {
+      if (!isJust) {
         const day = today.getDate();
         const rowCE = 11 + day;
         const rangeIn = `${PRESENZE_TAB}!C${rowCE}`;
@@ -397,67 +458,18 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
         }
       }
 
-      const res = await fetchWithTimeout(
-        GAS_ENDPOINT,
-        { method: "POST", body: JSON.stringify({ sheetId: (profilo as any).sheetId, secret: SECRET, writes }) },
-        10000
-      );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json().catch(() => ({ ok: true }));
-      if (!json?.ok) throw new Error(json?.error || "Errore sconosciuto lato server");
+      // ========= 1 sola chiamata a GAS =========
+      await saveAll({
+        email: userEmail,
+        sheetId: (profilo as any).sheetId,
+        writes,
+        presence: presencePayload,
+        plan: planPayload,
+      });
 
-      // ========= 2) SYNC PIANO FERIE SU GAS (NON BLOCCANTE) =========
-      const ymd = toYmdLocal(today);
-      (async () => {
-        try {
-          if (valueOrdinario === "F" || valueOrdinario === "ROL") {
-            const entry = {
-              email: userEmail,
-              nome: profilo?.nome || "",
-              cognome: profilo?.cognome || "",
-              date: ymd,
-              tipo: valueOrdinario === "F" ? "FERIE" : "ROL",
-              note: note || "",
-            };
-            const resPlan = await fetchWithTimeout(
-              GAS_ENDPOINT,
-              { method: "POST", body: JSON.stringify({ action: "savePlan", secret: SECRET, entries: [entry] }) },
-              8000
-            );
-            if (!resPlan.ok) throw new Error(`HTTP ${resPlan.status}`);
-            await resPlan.json().catch(() => ({ ok: true }));
-          } else {
-            const resDel = await fetchWithTimeout(
-              GAS_ENDPOINT,
-              {
-                method: "POST",
-                body: JSON.stringify({
-                  action: "deletePlan",
-                  secret: SECRET,
-                  items: [
-                    { email: userEmail, date: ymd, tipo: "FERIE" },
-                    { email: userEmail, date: ymd, tipo: "ROL" },
-                  ],
-                }),
-              },
-              8000
-            );
-            if (!resDel.ok) throw new Error(`HTTP ${resDel.status}`);
-            await resDel.json().catch(() => ({ ok: true }));
-          }
-        } catch (e) {
-          console.warn("Sync piano ferie fallita/timeout:", e);
-        }
-      })().catch(() => void 0);
-
-      // ========= 3) SCRITTURA SU FIRESTORE (USA SEMPRE uid) =========
-      const isJust = isGiustificativo(valueOrdinario);
-      const ordDec = !isJust ? (parseHoursComma(valueOrdinario!) ?? null) : null;
-      const otDec  = !isJust ? (straordinario ? Number(straordinario) : null) : null;
-      const just   = isJust ? valueOrdinario! : null;
-
+      // ========= Firestore (locale) =========
       await upsertDay(userUid, ymd, {
-        just,
+        just: isJust ? (valueOrdinario as string) : null,
         ordinary: ordDec,
         overtime: otDec,
       });
@@ -471,6 +483,7 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
     } finally {
       setSaving(false);
       setTimeout(() => setSaveOk(false), 800);
+      clearTimeout(watchdog);
     }
   }
 
@@ -496,39 +509,23 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
     <div className="min-h-screen bg-white">
       {/* HEADER */}
       <header className="sticky top-0 z-40 bg-white/90 backdrop-blur supports-[backdrop-filter]:bg-white/70 border-b shadow-sm">
-        <div className="px-3 py-3 sm:px-6 sm:py-4">
-          <div className="flex items-center justify-between gap-2">
-            <h1 className="text-base sm:text-xl md:text-2xl font-semibold">Foglio Presenze</h1>
-
-            {/* Gruppo destro sempre in linea, anche su mobile */}
-            <div className="flex items-center gap-2 min-w-0">
-              <div className="flex items-center gap-1">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => (window.location.href = "/ferie")}
-                  className="px-2 whitespace-nowrap"
-                >
+        <div className="p-4 sm:p-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              <h1 className="text-lg sm:text-xl md:text-2xl font-semibold">Foglio Presenze</h1>
+            </div>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+              <div className="flex gap-2 sm:gap-3 w-full sm:w-auto">
+                <Button variant="secondary" onClick={() => (window.location.href = "/ferie")} className="flex-1 sm:flex-none">
                   Piano Ferie
                 </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => signOut(auth)}
-                  className="px-2 whitespace-nowrap"
-                >
+                <Button variant="secondary" onClick={() => signOut(auth)} className="flex-1 sm:flex-none">
                   Esci
                 </Button>
               </div>
-
-              {/* Info utente, troncate per non andare a capo */}
-              <div className="hidden xs:flex flex-col items-end leading-tight min-w-0">
-                <p className="text-xs sm:text-sm truncate max-w-[38vw] sm:max-w-[22rem]">
-                  {profilo.nome} {profilo.cognome}
-                </p>
-                <p className="text-[10px] sm:text-xs text-slate-500 truncate max-w-[38vw] sm:max-w-[22rem]">
-                  {userEmail}
-                </p>
+              <div className="text-left sm:text-right">
+                <p className="text-sm">{profilo.nome} {profilo.cognome}</p>
+                <p className="text-xs text-slate-500 break-all">{userEmail}</p>
               </div>
             </div>
           </div>
@@ -778,7 +775,7 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
         </motion.div>
       </main>
 
-      {/* Action bar MOBILE */}
+      {/* Action bar MOBILE (unica riga) */}
       <div className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-white/95 border-t shadow-lg">
         <div className="px-3 py-2 grid grid-cols-3 gap-2">
           <Button size="sm" onClick={inviaDati} disabled={hasBlockingErrors || saving} className="w-full">Salva</Button>
@@ -816,7 +813,7 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
         </div>
       )}
 
-      {/* Overlay ANTEPRIMA CALENDARIO */}
+      {/* Overlay ANTEPRIMA CALENDARIO (griglia mese dal MASTER) */}
       {showPreview && (
         <div className="fixed inset-0 z-[60] flex flex-col bg-black/60 backdrop-blur-sm">
           <div className="flex items-center justify-between gap-2 px-4 sm:px-6 py-3 bg-white/95 border-b">
@@ -831,7 +828,7 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
 
           <div className="flex-1 p-2 sm:p-4">
             <div className="w-full h-full bg-white rounded-lg overflow-auto shadow relative">
-              <MonthlyPreview userId={userUid} yyyymm={yyyymm} />
+              <MonthlyPreview email={userEmail} yyyymm={yyyymm} />
             </div>
           </div>
         </div>
@@ -852,7 +849,6 @@ export default function App() {
       if (!mounted) return;
       try {
         if (!user) {
-          // Nessun utente → vai a Login
           setUserEmail(null);
           setUserUid(null);
           setReady(true);
@@ -862,9 +858,7 @@ export default function App() {
         const emailLower = user.email?.toLowerCase() ?? "";
         const uid = user.uid;
 
-        // Migrazione email→uid NON bloccante (fire-and-forget)
-        migrateEmailDaysToUid(emailLower, uid)
-          .catch((e) => console.warn("Migrazione email→uid fallita:", e));
+        migrateEmailDaysToUid(emailLower, uid).catch((e) => console.warn("Migrazione email→uid fallita:", e));
 
         setUserEmail(emailLower);
         setUserUid(uid);
@@ -875,7 +869,6 @@ export default function App() {
       }
     });
 
-    // Watchdog: anche se qualcosa va storto, sblocca l'UI
     const watchdog = setTimeout(() => setReady(true), 4000);
 
     return () => {

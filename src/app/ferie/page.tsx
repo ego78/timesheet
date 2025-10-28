@@ -20,7 +20,7 @@ import { WORKERS } from "../workers";
 
 const GAS_ENDPOINT =
   process.env.NEXT_PUBLIC_GAS_ENDPOINT ||
-  "https://script.google.com/macros/s/AKfycbx2cyiFykEvzA5NcRK5Cr2lb4EMOHoJUG7CWJkh06HUUEoKsMzB_wqpcZPZ0vomnIqKjw/exec";
+  "https://script.google.com/macros/s/AKfycbwTOf7NK_VIpjqVU7-tyZBRECNCfG2089JJCnNT4zVnJfqOFp6c96fa5AAmbm80RQ0NPw/exec";
 
 const SECRET = "CAMBIA-MI";
 
