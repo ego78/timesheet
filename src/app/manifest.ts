@@ -6,8 +6,8 @@ export default function manifest(): MetadataRoute.Manifest {
     id: "/?source=pwa",                // identificatore stabile dell'app
     lang: "it-IT",
     dir: "ltr",
-    name: "Presenze App",
-    short_name: "Presenze",
+    name: "JobTime App",
+    short_name: "JobTime",
     description: "Registra ore, progetti e report.",
     start_url: "/?source=pwa",
     scope: "/",
