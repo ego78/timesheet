@@ -508,29 +508,44 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
   return (
     <div className="min-h-screen bg-white">
       {/* HEADER */}
-      <header className="sticky top-0 z-40 bg-white/90 backdrop-blur supports-[backdrop-filter]:bg-white/70 border-b shadow-sm">
-        <div className="p-4 sm:p-6">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-3">
-              <h1 className="text-lg sm:text-xl md:text-2xl font-semibold">Foglio Presenze</h1>
-            </div>
-            <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
-              <div className="flex gap-2 sm:gap-3 w-full sm:w-auto">
-                <Button variant="secondary" onClick={() => (window.location.href = "/ferie")} className="flex-1 sm:flex-none">
-                  Piano Ferie
-                </Button>
-                <Button variant="secondary" onClick={() => signOut(auth)} className="flex-1 sm:flex-none">
-                  Esci
-                </Button>
-              </div>
-              <div className="text-left sm:text-right">
-                <p className="text-sm">{profilo.nome} {profilo.cognome}</p>
-                <p className="text-xs text-slate-500 break-all">{userEmail}</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </header>
+      {/* HEADER (versione slim) */}
+<header className="sticky top-0 z-40 bg-white/90 backdrop-blur supports-[backdrop-filter]:bg-white/70 border-b shadow-sm">
+  <div className="px-3 py-2 sm:px-5 sm:py-3">
+    <div className="grid grid-cols-2 items-center gap-2 sm:flex sm:items-center sm:justify-between">
+      
+      {/* Titolo */}
+      <div>
+        <h1 className="text-base sm:text-lg font-semibold">Foglio Presenze</h1>
+      </div>
+
+      {/* Nome + Email */}
+      <div className="justify-self-end text-right leading-tight">
+        <p className="text-sm font-medium">{profilo.nome} {profilo.cognome}</p>
+        <p className="text-[11px] text-slate-500 break-all">{userEmail}</p>
+      </div>
+
+      {/* Pulsanti */}
+      <div className="col-span-2 flex gap-2 mt-1 sm:mt-0 sm:w-auto">
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => (window.location.href = "/ferie")}
+          className="flex-1 sm:flex-none"
+        >
+          Piano Ferie
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => signOut(auth)}
+          className="flex-1 sm:flex-none"
+        >
+          Esci
+        </Button>
+      </div>
+    </div>
+  </div>
+</header>
 
       <main className="max-w-3xl mx-auto p-4 sm:p-6 md:p-8">
         <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}>
@@ -776,18 +791,34 @@ function WorkerPage({ userEmail, userUid }: { userEmail: string; userUid: string
       </main>
 
       {/* Action bar MOBILE (unica riga) */}
-      <div className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-white/95 border-t shadow-lg">
-        <div className="px-3 py-2 grid grid-cols-3 gap-2">
-          <Button size="sm" onClick={inviaDati} disabled={hasBlockingErrors || saving} className="w-full">Salva</Button>
-          <Button size="sm" variant="secondary" onClick={() => setShowPreview((v) => !v)} disabled={saving} className="w-full">Anteprima</Button>
-          <Button size="sm" variant="secondary" onClick={() => (window.location.href = "/ferie")} disabled={saving} className="w-full">Ferie</Button>
-        </div>
+      {/* Action bar MOBILE (unica riga, senza tasto Ferie) */}
+<div className="sm:hidden fixed bottom-0 inset-x-0 z-40 bg-white/95 border-t shadow-lg">
+  <div className="px-3 py-2 grid grid-cols-2 gap-2">
+    <Button
+      size="sm"
+      onClick={inviaDati}
+      disabled={hasBlockingErrors || saving}
+      className="w-full"
+    >
+      Salva
+    </Button>
+    <Button
+      size="sm"
+      variant="secondary"
+      onClick={() => setShowPreview((v) => !v)}
+      disabled={saving}
+      className="w-full"
+    >
+      {showPreview ? "Chiudi" : "Anteprima"}
+    </Button>
+  </div>
 
-        <div className="px-3 pb-2">
-          {status && <span className="text-xs text-emerald-600">{status}</span>}
-          {err && <span className="text-xs text-red-600">{err}</span>}
-        </div>
-      </div>
+  <div className="px-3 pb-2">
+    {status && <span className="text-xs text-emerald-600">{status}</span>}
+    {err && <span className="text-xs text-red-600">{err}</span>}
+  </div>
+</div>
+
 
       {/* Overlay Salvataggio */}
       {(saving || saveOk) && (

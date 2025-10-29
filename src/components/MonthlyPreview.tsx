@@ -112,19 +112,22 @@ export default function MonthlyPreview({
       {err && <p className="text-sm text-red-600 p-2">Errore anteprima: {err}</p>}
 
       {/* header con mese + totali */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-2">
-        <h3 className="text-base font-semibold text-slate-800">
-          {new Date(y, m0, 1).toLocaleDateString("it-IT", { month: "long", year: "numeric" })}
-        </h3>
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 text-emerald-700 px-2 py-0.5">
-            <strong>OR:</strong> {formatDecimiIT(totOrd)}
-          </span>
-          <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-700 px-2 py-0.5">
-            <strong>ST:</strong> {formatDecimiIT(totOt)}
-          </span>
-        </div>
-      </div>
+      {/* header con mese + totali */}
+<div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-2">
+  <h3 className="text-base font-semibold text-slate-800">
+    {new Date(y, m0, 1).toLocaleDateString("it-IT", { month: "long", year: "numeric" })}
+  </h3>
+
+  <div className="flex flex-wrap items-center gap-2 text-sm">
+    <span className="text-slate-700 font-medium mr-1">Totali:</span>
+    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 text-emerald-700 px-2 py-0.5">
+      <strong>OR:</strong> {formatDecimiIT(totOrd)}
+    </span>
+    <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-700 px-2 py-0.5">
+      <strong>ST:</strong> {formatDecimiIT(totOt)}
+    </span>
+  </div>
+</div>
 
       {/* intestazione giorni settimana */}
       <div className="grid grid-cols-7 gap-2 text-xs font-medium text-slate-600 mb-2">
