@@ -1,183 +1,149 @@
 "use client";
 
-import React from "react";
-
-/**
- * Banner/Toast per invitare all'installazione della PWA
- * - Android/Chrome: usa beforeinstallprompt
- * - iOS/Safari: mostra istruzioni Add to Home
- * - Throttling: non ripropone per N giorni se chiudi
- */
-
-type DeferredPromptEvent = Event & {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
-};
-
-const STORAGE_KEY = "pwaPromptDismissedUntil";
-const COOLDOWN_DAYS = 7; // ripropone dopo 7 giorni se chiuso
-
-function isStandalone(): boolean {
-  // iOS Safari
-  const nav = (navigator as any);
-  if ("standalone" in window.navigator && (window.navigator as any).standalone) return true;
-  // altri browser
-  return window.matchMedia("(display-mode: standalone)").matches;
-}
-
-function isIosSafari(): boolean {
-  const ua = (typeof navigator !== "undefined" ? navigator.userAgent : "").toLowerCase();
-  const isIOS = /iphone|ipad|ipod/.test(ua);
-  // Safari (no Chrome/Firefox su iOS)
-  const isSafari = isIOS && !!(window as any).webkit && !/crios|fxios|edgios/.test(ua);
-  return isIOS && isSafari;
-}
-
-function isCooldownActive(): boolean {
-  try {
-    const s = localStorage.getItem(STORAGE_KEY);
-    if (!s) return false;
-    const until = new Date(s).getTime();
-    return Date.now() < until;
-  } catch {
-    return false;
-  }
-}
-
-function setCooldown(days = COOLDOWN_DAYS) {
-  try {
-    const until = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-    localStorage.setItem(STORAGE_KEY, until.toISOString());
-  } catch {}
-}
+import React, { useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 
 export default function InstallPWA() {
-  const [deferredPrompt, setDeferredPrompt] = React.useState<DeferredPromptEvent | null>(null);
-  const [showAndroidBanner, setShowAndroidBanner] = React.useState(false);
-  const [showIosBanner, setShowIosBanner] = React.useState(false);
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [showModal, setShowModal] = useState(false);
+  const [showToast, setShowToast] = useState(false);
+  const [isInstalled, setIsInstalled] = useState(false);
 
-  // intercetta beforeinstallprompt per Android/Chrome
-  React.useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    // già installata o in standalone → non mostrare
-    if (isStandalone()) return;
-
-    // cooldown attivo → non mostrare
-    if (isCooldownActive()) return;
-
-    const onBeforeInstall = (e: Event) => {
+  // intercetta evento PWA installabile
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e: any) => {
       e.preventDefault();
-      setDeferredPrompt(e as DeferredPromptEvent);
-      // piccolo delay per non “saltare addosso”
-      setTimeout(() => setShowAndroidBanner(true), 500);
+      setDeferredPrompt(e);
+      const alreadySeen = localStorage.getItem("pwaModalShown");
+      if (!alreadySeen) {
+        setShowModal(true); // prima visita → fullscreen
+        localStorage.setItem("pwaModalShown", "true");
+      } else {
+        setShowToast(true); // successive → toast compatto
+      }
     };
 
-    window.addEventListener("beforeinstallprompt", onBeforeInstall as any);
+    const handleAppInstalled = () => {
+      setIsInstalled(true);
+      setShowModal(false);
+      setShowToast(false);
+      localStorage.setItem("pwaInstalled", "true");
+    };
 
-    // iOS Safari non ha beforeinstallprompt → mostra istruzioni
-    if (isIosSafari()) {
-      setTimeout(() => setShowIosBanner(true), 800);
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    window.addEventListener("appinstalled", handleAppInstalled);
+
+    // Se è già installata, non mostrare nulla
+    if (window.matchMedia("(display-mode: standalone)").matches || localStorage.getItem("pwaInstalled") === "true") {
+      setIsInstalled(true);
     }
 
-    // se l’utente installa, chiudi tutto e rimuovi cooldown
-    const onAppInstalled = () => {
-      setShowAndroidBanner(false);
-      setShowIosBanner(false);
-      try { localStorage.removeItem(STORAGE_KEY); } catch {}
-    };
-    window.addEventListener("appinstalled", onAppInstalled);
-
     return () => {
-      window.removeEventListener("beforeinstallprompt", onBeforeInstall as any);
-      window.removeEventListener("appinstalled", onAppInstalled);
+      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      window.removeEventListener("appinstalled", handleAppInstalled);
     };
   }, []);
 
-  async function handleInstallClick() {
+  // Funzione per avviare l’installazione
+  const handleInstall = async () => {
     if (!deferredPrompt) return;
-    try {
-      await deferredPrompt.prompt();
-      const { outcome } = await deferredPrompt.userChoice;
-      if (outcome === "accepted") {
-        setShowAndroidBanner(false);
-      } else {
-        // rifiutato → non riproporre per un po’
-        setCooldown();
-        setShowAndroidBanner(false);
-      }
-      setDeferredPrompt(null);
-    } catch {
-      setCooldown();
-      setShowAndroidBanner(false);
-      setDeferredPrompt(null);
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === "accepted") {
+      setIsInstalled(true);
+      setShowModal(false);
+      setShowToast(false);
+      localStorage.setItem("pwaInstalled", "true");
     }
-  }
+  };
 
-  function handleClose() {
-    setCooldown();
-    setShowAndroidBanner(false);
-    setShowIosBanner(false);
-  }
+  if (isInstalled) return null;
 
   return (
     <>
-      {/* Banner Android/Chrome */}
-      {showAndroidBanner && (
-        <div className="fixed bottom-4 left-4 right-4 z-[100]">
-          <div className="rounded-2xl border shadow-lg bg-white p-3 flex items-center gap-3">
-            <img
-              src="/icons/icon-192.png"
-              alt=""
-              className="h-9 w-9 rounded-md"
-            />
-            <div className="min-w-0">
-              <p className="text-sm font-medium">Installa “Ore App”</p>
-              <p className="text-xs text-slate-600 truncate">
-                Aggiungi l’app alla schermata Home per un accesso più veloce.
-              </p>
+      {/* ========================= MODAL FULLSCREEN ========================= */}
+      <AnimatePresence>
+        {showModal && (
+          <motion.div
+            key="modal"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] bg-white flex flex-col items-center justify-center text-center p-6"
+          >
+            {/* Immagine flat */}
+            <div className="w-full max-w-md rounded-xl overflow-hidden border bg-slate-50 shadow-lg">
+              <picture>
+                <source srcSet="/images/pwa-flat.webp" type="image/webp" />
+                <img
+                  src="/images/pwa-flat.png"
+                  alt="Installa l'app sul tuo dispositivo"
+                  loading="eager"
+                  className="w-full h-auto object-cover"
+                />
+              </picture>
             </div>
-            <div className="ml-auto flex items-center gap-2">
-              <button
-                onClick={handleClose}
-                className="text-xs px-2 py-1 rounded-md border hover:bg-slate-50"
-              >
-                No, grazie
-              </button>
-              <button
-                onClick={handleInstallClick}
-                className="text-xs px-3 py-1.5 rounded-md bg-sky-600 text-white hover:bg-sky-700"
-              >
-                Installa
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {/* Banner iOS/Safari */}
-      {showIosBanner && (
-        <div className="fixed bottom-4 left-4 right-4 z-[100]">
-          <div className="rounded-2xl border shadow-lg bg-white p-3">
-            <div className="flex items-start gap-3">
-              <img src="/icons/icon-192.png" alt="" className="h-9 w-9 rounded-md" />
-              <div className="min-w-0">
-                <p className="text-sm font-medium">Aggiungi “Ore App” alla Home</p>
-                <ol className="mt-1 text-xs text-slate-700 list-decimal pl-4 space-y-1">
-                  <li>Premi il tasto <span className="font-medium">Condividi</span> di Safari (freccia verso l’alto).</li>
-                  <li>Seleziona <span className="font-medium">“Aggiungi alla schermata Home”</span>.</li>
-                </ol>
-              </div>
+            <h2 className="mt-6 text-2xl font-semibold text-slate-800">
+              Installa l'app sul tuo dispositivo
+            </h2>
+            <p className="mt-2 text-slate-600 max-w-sm">
+              Aggiungi l'app alla schermata principale per un accesso più veloce e un'esperienza completa.
+            </p>
+
+            <div className="mt-6 flex flex-col sm:flex-row gap-3">
               <button
-                onClick={handleClose}
-                className="ml-auto text-xs px-2 py-1 rounded-md border hover:bg-slate-50"
+                onClick={handleInstall}
+                className="bg-sky-600 hover:bg-sky-700 text-white font-medium px-5 py-2 rounded-xl shadow"
               >
-                Chiudi
+                Installa ora
+              </button>
+              <button
+                onClick={() => setShowModal(false)}
+                className="bg-slate-200 hover:bg-slate-300 text-slate-800 font-medium px-5 py-2 rounded-xl"
+              >
+                Più tardi
               </button>
             </div>
-          </div>
-        </div>
-      )}
+
+            <p className="mt-4 text-xs text-slate-500">
+              Su iPhone: apri in Safari e scegli <strong>“Aggiungi alla schermata Home”</strong>.
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ========================= TOAST COMPATTO ========================= */}
+      <AnimatePresence>
+        {showToast && !isInstalled && (
+          <motion.div
+            key="toast"
+            initial={{ y: -80, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: -80, opacity: 0 }}
+            transition={{ type: "spring", stiffness: 200, damping: 20 }}
+            className="fixed top-3 left-1/2 -translate-x-1/2 z-[99] bg-white border shadow-lg rounded-full px-4 py-2 flex items-center gap-3"
+          >
+            <picture>
+              <source srcSet="/images/pwa-flat.webp" type="image/webp" />
+              <img
+                src="/images/pwa-flat.png"
+                alt="App icon"
+                className="w-8 h-8 rounded-full object-cover border"
+              />
+            </picture>
+            <span className="text-sm text-slate-800 font-medium">
+              Installa l'app per un accesso rapido
+            </span>
+            <button
+              onClick={handleInstall}
+              className="ml-2 text-sky-600 font-semibold text-sm hover:underline"
+            >
+              Installa
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </>
   );
 }
