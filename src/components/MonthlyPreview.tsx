@@ -118,10 +118,10 @@ export default function MonthlyPreview({
         </h3>
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 text-emerald-700 px-2 py-0.5">
-            <strong>Ord:</strong> {formatDecimiIT(totOrd)}
+            <strong>OR:</strong> {formatDecimiIT(totOrd)}
           </span>
           <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 text-amber-700 px-2 py-0.5">
-            <strong>OT:</strong> {formatDecimiIT(totOt)}
+            <strong>ST:</strong> {formatDecimiIT(totOt)}
           </span>
         </div>
       </div>
@@ -165,7 +165,7 @@ export default function MonthlyPreview({
               return { txt: just, cls };
             }
             if (typeof c.data.ordinary === "number" && c.data.ordinary > 0) {
-              return { txt: `Ord ${formatDecimiIT(c.data.ordinary)}`, cls: "bg-emerald-100 text-emerald-700" };
+              return { txt: `OR ${formatDecimiIT(c.data.ordinary)}`, cls: "bg-emerald-100 text-emerald-700" };
             }
             return null;
           })();
@@ -173,7 +173,7 @@ export default function MonthlyPreview({
           // badge destra: straordinario
           const rightBadge =
             c.data && typeof c.data.overtime === "number" && c.data.overtime > 0
-              ? { txt: `OT ${formatDecimiIT(c.data.overtime)}`, cls: "bg-amber-100 text-amber-700" }
+              ? { txt: `ST ${formatDecimiIT(c.data.overtime)}`, cls: "bg-amber-100 text-amber-700" }
               : null;
 
           return (
